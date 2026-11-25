@@ -61,7 +61,12 @@ const ROPE_K = 7000;
 const ROPE_C = 1200;
 const ROPE_BREAK = 6500;
 const TRUCK_PULL_MAX = 2800;
-const JACK_MAX_LIFT = 0.45;
+const JACK_MAX_LIFT = 0.3; // a bottle/scissor jack under the sill: enough to float a tyre hanging in a ditch
+const JACK_CLOSE_RATE = 10; // 1/s  how fast a corner that sank below the jack head is brought back up
+const JACK_MAX_PUSH_SPEED = 0.1; // m/s  limit of that correction
+const JACK_FMAX = 30000; // N  safety only: the head is a rigid column; what keeps the car from being launched is the slow head speed (JACK_MAX_PUSH_SPEED)
+const JACK_MIN_UP = 0.84; // body up-vector y below this (~33 deg tilt): the jack stops pushing
+const JACK_BODY_DAMPING = 0.6; // angular damping while jacked
 const ITEM_REACH = 2.4; // m from the nearest tyre: how far the player can reach
 const TYRE_UNDER_CLEARANCE = 0.34; // an item centre closer than this to a tyre counts as 'directly under' it
 const BASE_REST = 0.22; // suspension rest length
@@ -399,7 +404,7 @@ export class Sim {
       const wi = v.wheelInfos[i];
       const soft = st.surface === 'mud' ? 1 : st.surface === 'grass' ? 0.3 : 0;
       const rel = wi.worldTransform.position.vsub(ch.position);
-      const vel = ch.getVelocityAtWorldPoint(rel, new Vec3());
+      const vel = ch.getVelocityAtWorldPoint(wi.worldTransform.position, new Vec3()); // takes a WORLD point
       const hs = Math.hypot(vel.x, vel.z); // ground speed of the tyre
       if (st.spinning && soft && thr !== 0) this.dig[i] = Math.min(1, this.dig[i] + DIG_RATE * soft * dt);
       else if (!st.air && !soft) this.dig[i] = Math.max(0, this.dig[i] - 0.3 * dt); // firm surface / board under the tyre
@@ -468,11 +473,12 @@ export class Sim {
   jackMove(dir, dt) {
     if (!this.jack) return;
     const j = this.jack;
-    j.target = clamp(j.target + dir * 0.12 * dt, 0, JACK_MAX_LIFT);
+    j.target = clamp(j.target + dir * 0.08 * dt, 0, JACK_MAX_LIFT);
   }
 
   _jackForce() {
     const j = this.jack;
+    this.chassis.angularDamping = j ? JACK_BODY_DAMPING : 0.3;
     if (!j) return;
     const ch = this.chassis;
     j.lift += (j.target - j.lift) * Math.min(1, DT * 8);
@@ -484,13 +490,33 @@ export class Sim {
       this.say('ジャッキが倒れた! 車体が落ちた (ミス+1)', 'bad');
       return;
     }
+    // The jack head is a rigid column, not a spring: a velocity-level contact. It only stops the corner from
+    // going below the head height (and pushes it back up if it already sank), never pulls, and is capped at
+    // JACK_FMAX so it can never launch the car. No spring => nothing to oscillate.
     const cp = this.cornerWorld(j.wheel);
     const targetY = j.y0 + j.lift - j.sink;
-    const err = targetY - cp.y;
+    const err = targetY - cp.y; // > 0: the corner is below the head
     const rel = cp.vsub(ch.position);
-    const vel = ch.getVelocityAtWorldPoint(rel, new Vec3());
-    const f = clamp(45000 * err - 4500 * vel.y, 0, 7500);
-    if (f > 0) ch.applyForce(new Vec3(0, f, 0), rel);
+    const vel = ch.getVelocityAtWorldPoint(cp, new Vec3()); // takes a WORLD point, not an offset
+    const vDes = err > 0 ? Math.min(err * JACK_CLOSE_RATE, JACK_MAX_PUSH_SPEED) : Math.max(err * JACK_CLOSE_RATE, -1);
+    const n = new Vec3(0, 1, 0);
+    const rn = rel.cross(n);
+    const kEff = ch.invMass + rn.dot(ch.invInertiaWorld.vmult(rn));
+    // feed-forward: how much did gravity / suspension / contacts change the corner's speed during the last step
+    // (apart from our own push)? Predict the same again so the corner lands exactly on vDes instead of sagging.
+    const other = j.pv === undefined ? 0 : vel.y - (j.pv + kEff * j.pJ);
+    let J = Math.max(0, (vDes - vel.y - other) / kEff); // impulse that brings the corner's vertical speed to vDes
+    J = Math.min(J, JACK_FMAX * DT);
+    // safety: a real jack is only used while the car stays stable. Stop pushing when fewer than two other
+    // tyres carry load (the car would be balanced on the jack) or when the body is tipping over.
+    const carrying = this.wheelState.filter((w, i) => i !== j.wheel && !w.air && w.load > 200).length;
+    if (carrying < 2 || this.tilt() < JACK_MIN_UP) {
+      J = 0;
+      j.target = Math.min(j.target, j.lift); // the stop becomes the new limit; lowering still works
+    }
+    j.pv = vel.y;
+    j.pJ = J;
+    if (J > 0) ch.applyImpulse(new Vec3(0, J, 0), rel);
     j.cornerY = cp.y;
     j.cornerX = cp.x;
     j.cornerZ = cp.z;
@@ -523,7 +549,7 @@ export class Sim {
     const dist = d.length();
     const dir = d.scale(1 / (dist || 1));
     const rel = hook.vsub(this.chassis.position);
-    const vel = this.chassis.getVelocityAtWorldPoint(rel, new Vec3());
+    const vel = this.chassis.getVelocityAtWorldPoint(hook, new Vec3()); // takes a WORLD point
     const stretch = dist - r.L0;
     let T = 0;
     if (stretch > 0) T = Math.max(0, ROPE_K * stretch - ROPE_C * vel.dot(dir));

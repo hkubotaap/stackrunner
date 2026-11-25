@@ -28,9 +28,9 @@ const cases = [
   ['normal: rope alone is stuck', () => play({ engine: false, setup: (s) => { s.toggleRope(); s.setPulling(true); } }), false],
   ['normal: rope + engine escapes', () => play({ ...drive, vsa: false, secs: 40, setup: (s) => { s.toggleRope(); s.setPulling(true); } }), true],
   ['hard: no item rocking never escapes', () => rockers.some((r) => play({ level: 'hard', ...r, secs: 30 })), false],
-  ['hard: rope + helpers + rocking escapes', () => play({ level: 'hard', vsa: false, fwd: 1, back: 0.5, sf: -1, sb: 0, setup: ropeAndHelpers }), true],
+  ['hard: rope + helpers + rocking escapes', () => play({ level: 'hard', vsa: false, fwd: 0.5, back: 0.5, sf: -1, sb: -1, setup: ropeAndHelpers }), true],
   ['extreme: no item rocking never escapes', () => rockers.some((r) => play({ level: 'extreme', ...r, secs: 30 })), false],
-  ['extreme: rope + helpers + rocking escapes', () => play({ level: 'extreme', vsa: false, fwd: 1, back: 1, sf: -1, sb: 0, setup: ropeAndHelpers }), true],
+  ['extreme: rope + helpers + rocking escapes', () => play({ level: 'extreme', vsa: false, fwd: 0.5, back: 0.5, sf: -1, sb: -1, setup: ropeAndHelpers }), true],
 ];
 
 // brakes on asphalt: stopping distance from ~30 km/h
@@ -157,25 +157,46 @@ cases.push(
 
 // ---- recovering: a tyre standing on an item pins it
 const pin = new Sim({ level: 'hard' });
+const pw = pin.vehicle.wheelInfos[0].worldTransform.position;
+pin.placeItemAt('mat', pw.x - 0.45, pw.z); // pad beside the jack base (not under the tyre): the jack does not sink into the mud
 pin.toggleJack(0);
 for (let i = 0; i < 6 * 60; i++) { pin.jackMove(1, 1 / 60); pin.update(1 / 60); }
 pin.placeItem('helper', 0, 'under'); // allowed: the tyre is off the ground
+const helperItem = pin.items.find((it) => it.kind === 'helper');
 for (let i = 0; i < 8 * 60; i++) { pin.jackMove(-1, 1 / 60); pin.update(1 / 60); } // lower the car onto the helper
 const standingOn = pin.wheelState[0].surface === 'helper';
-const refused = pin.recoverLastItem();
-const stillThere = pin.items.length === 1;
+const pinned = pin._recoverBlock(helperItem) !== null;
+pin.recoverLastItem(); // the helper is pinned: whatever else comes out, the helper stays
+const helperStays = pin.items.includes(helperItem);
 for (let i = 0; i < 8 * 60; i++) { pin.jackMove(1, 1 / 60); pin.update(1 / 60); } // lift again: the tyre leaves it
-const freed = pin.recoverLastItem();
+const freed = pin._recoverBlock(helperItem) === null && (() => { while (pin.items.length && pin.recoverLastItem()); return pin.items.length === 0; })();
 // a free item elsewhere is recovered even though an older one is pinned
 const mix = new Sim({ level: 'hard' });
 mix.placeItem('helper', 0, 'diagFront');
 const mixOk = mix.recoverLastItem() && mix.items.length === 0 && mix.stock.helper === 2;
 cases.push(
   ['tyre rests on the helper after the jack is lowered', () => standingOn, true],
-  ['an item with a tyre on it cannot be recovered', () => refused === false && stillThere, true],
-  ['it can be recovered once the tyre is lifted off again', () => freed === true && pin.items.length === 0, true],
+  ['an item with a tyre on it stays pinned', () => pinned && helperStays, true],
+  ['it can be recovered once the tyre is lifted off again', () => freed, true],
   ['a free item is recovered normally and refunded', () => mixOk, true],
 );
+
+// ---- jack: lifts a corner smoothly, holds it without bobbing, never tips the car
+for (const level of ['normal', 'hard']) {
+  const jk = new Sim({ level });
+  const w0 = jk.vehicle.wheelInfos[0].worldTransform.position;
+  jk.placeItemAt('mat', w0.x - 0.45, w0.z); // pad beside the jack base: no mud sinking during the hold
+  jk.toggleJack(0);
+  for (let i = 0; i < 6 * 60; i++) { jk.jackMove(1, 1 / 60); jk.update(1 / 60); }
+  const ys = [];
+  let minUp = 1;
+  for (let i = 0; i < 4 * 60; i++) { jk.update(1 / 60); ys.push(jk.cornerWorld(0).y); minUp = Math.min(minUp, jk.tilt()); }
+  const bob = Math.max(...ys) - Math.min(...ys);
+  cases.push(
+    [`jack (${level}): raised corner stays still (bob ${(bob * 100).toFixed(1)} cm)`, () => bob < 0.015, true],
+    [`jack (${level}): floats the tyre and never tips the car`, () => jk.wheelState[0].air && minUp > 0.84, true],
+  );
+}
 
 let fail = 0;
 for (const [name, fn, expect] of cases) {
