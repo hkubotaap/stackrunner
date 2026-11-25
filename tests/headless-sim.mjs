@@ -198,6 +198,49 @@ for (const level of ['normal', 'hard']) {
   );
 }
 
+// ---- Impreza Sports Wagon (GG, 2.0 AWD): same map and rules, different car
+const imp = new Sim({ car: 'impreza', level: 'hard' });
+const iw = imp.vehicle.wheelInfos.map((w) => w.worldTransform.position);
+const rockImp = [];
+for (const vsa of [true, false]) for (const fwd of [0.5, 1, 2.5]) for (const back of [0.5, 1]) for (const sf of [-1, 0]) for (const sb of [-1, 1]) rockImp.push({ vsa, fwd, back, sf, sb });
+function playImp(opts) {
+  const s = new Sim({ car: 'impreza', level: 'hard' });
+  s.vsa = opts.vsa;
+  let tm = 0;
+  while (tm < 30 && !s.won && !s.flipped) {
+    const f = tm % (opts.fwd + opts.back) < opts.fwd;
+    s.setInput({ throttle: f ? 1 : -1, steer: f ? opts.sf : opts.sb, brake: false });
+    s.update(1 / 30); tm += 1 / 30;
+  }
+  return s.won;
+}
+const impDrive = (x, z, secs) => {
+  const s = new Sim({ car: 'impreza' });
+  s.chassis.position.set(x, 0.9, z); s.chassis.quaternion.set(0, 0, 0, 1);
+  s.chassis.velocity.set(0, 0, 0); s.chassis.angularVelocity.set(0, 0, 0); s.vsa = false;
+  for (let i = 0; i < 120; i++) s.update(1 / 60);
+  s.setInput({ throttle: 1, steer: 0, brake: false });
+  for (let i = 0; i < secs * 60; i++) s.update(1 / 60);
+  return s.chassis.position.z;
+};
+const impJack = new Sim({ car: 'impreza', level: 'hard' });
+const ijw = impJack.vehicle.wheelInfos[0].worldTransform.position;
+impJack.placeItemAt('mat', ijw.x - 0.5, ijw.z);
+impJack.toggleJack(0);
+for (let i = 0; i < 7 * 60; i++) { impJack.jackMove(1, 1 / 60); impJack.update(1 / 60); }
+const ijys = [];
+for (let i = 0; i < 4 * 60; i++) { impJack.update(1 / 60); ijys.push(impJack.cornerWorld(0).y); }
+cases.push(
+  ['impreza: 1330 kg, wheelbase 2525 mm', () => imp.chassis.mass === 1330 && Math.abs(iw[0].z - iw[2].z - 2.525) < 0.002, true],
+  ['impreza: starts with the left tyres in the mud, right on asphalt', () => imp.wheelState.map((w) => w.surface).join() === 'mud,road,mud,road', true],
+  ['impreza: no-item rocking does not get it out (same map, same rules)', () => rockImp.some((r) => playImp(r)), false],
+  ['impreza: floor mat under a tyre is still refused', () => imp.previewAt('mat', iw[0].x, iw[0].z).ok, false],
+  ['impreza: helper under a grounded tyre is still refused', () => imp.previewAt('helper', iw[1].x, iw[1].z).ok, false],
+  ['impreza: jack floats the tyre without bobbing', () => impJack.wheelState[0].air && Math.max(...ijys) - Math.min(...ijys) < 0.015, true],
+  ['impreza: stopped by the tree trunk', () => impDrive(-9, -16, 10) < -7.5, true],
+  ['impreza: stopped by the kei truck', () => impDrive(-1.2, -20, 12) < 0.8, true],
+);
+
 let fail = 0;
 for (const [name, fn, expect] of cases) {
   const got = fn();

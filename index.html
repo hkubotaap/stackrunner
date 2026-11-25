@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>STACK RUNNER - N-BOX脱出</title>
+<title>STACK RUNNER - 脱出ゲーム</title>
 <style>
   :root {
     --panel: rgba(14, 18, 24, 0.78);
@@ -107,7 +107,7 @@
 </div>
 
 <div id="car" class="panel">
-  <h2>N-BOX CUSTOM 4WD</h2>
+  <h2 id="cartitle">N-BOX CUSTOM 4WD</h2>
   <div id="speedrow"><span id="speed">0</span><small>km/h</small><span id="gear"></span>
     <button id="vsa" title="V">VSA</button></div>
   <div id="lamps"><span id="l-side" title="サイドブレーキ">(P) SIDE</span><span id="l-foot" title="フットブレーキ">BRAKE</span><span id="l-hold" title="オートブレーキホールド">AUTO HOLD</span></div>
@@ -154,7 +154,8 @@
     <div id="brakeinfo"></div>
   </div>
   <div class="grp">
-    <h2>難易度</h2>
+    <h2>車種 / 難易度</h2>
+    <div class="row" id="cars"></div>
     <div class="row" id="levels"></div>
     <div class="row"><button class="tb" id="b-reset">リセット<kbd>Esc</kbd></button></div>
   </div>

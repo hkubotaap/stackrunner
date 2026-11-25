@@ -4,6 +4,9 @@
 // curb weight 1000kg, 658cc turbo 47kW/6000rpm 104Nm/2600rpm, CVT (1st 3.152, final 4.619), 165/55R15.
 // Stage 1: car dropped its left wheels into a mud-bottomed side ditch pocket (x>3).
 import * as CANNON from 'cannon-es';
+import { CARS, DEFAULT_CAR, wheelDefsFor } from './cars.js';
+
+export { CARS };
 
 const { Vec3, Quaternion, Body, Box } = CANNON;
 
@@ -16,12 +19,7 @@ export const LEVELS = {
   extreme: { label: '鬼', depth: 0.44, pocket: 6, yaw: 0.2, mud: 0.06 },
 };
 
-export const WHEEL_DEFS = [
-  { id: 'FL', name: '左前', x: 0.6475, z: 1.26, front: true },
-  { id: 'FR', name: '右前', x: -0.6475, z: 1.26, front: true },
-  { id: 'RL', name: '左後', x: 0.6475, z: -1.26, front: false },
-  { id: 'RR', name: '右後', x: -0.6475, z: -1.26, front: false },
-];
+export const WHEEL_DEFS = wheelDefsFor(CARS[DEFAULT_CAR]); // names / sides; per-car positions: sim.wheelDefs
 
 // friction coefficient per surface kind
 export const GRIP = { road: 1.0, grass: 0.55, mud: 0.07, helper: 1.25, mat: 0.7 };
@@ -48,13 +46,8 @@ export const PLACE_DIRS = {
   under: { label: '真下', angle: null },
 };
 
-const ENGINE_FORCE = 4800; // N total: 104Nm x 3.152 x 4.619 x 0.9 / 0.281m (tyre radius)
-const SHARE_FRONT = 0.55; // 4WD coupling: front-biased
 const FOOT_BRAKE = 20; // brake impulse limit per wheel per step (~0.75 g total)
-const DIFF_BIAS = 1.6; // torque bias ratio of the axle differentials
 const MAX_SPEED = 15; // m/s soft limit
-const MAX_STEER = 0.55;
-const HOOK_LOCAL = new Vec3(0, -0.45, 1.72);
 const TRUCK_X = -1.2;
 const TRUCK_Z0 = 4.2;
 const ROPE_K = 7000;
@@ -81,6 +74,9 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 export class Sim {
   constructor(opts = {}) {
+    this.car = CARS[opts.car ?? DEFAULT_CAR];
+    this.wheelDefs = wheelDefsFor(this.car);
+    this.hookLocal = new Vec3(...this.car.hook);
     this.levelKey = opts.level ?? 'normal';
     this.level = { ...LEVELS[this.levelKey], ...(opts.override ?? {}) };
     this.world = new CANNON.World({ gravity: new Vec3(0, -9.82, 0) });
@@ -111,7 +107,7 @@ export class Sim {
     this.flipTimer = 0;
     this.flipped = false;
     this.playing = false;
-    this.wheelState = WHEEL_DEFS.map(() => ({ grip: 0, load: 0, surface: 'air', spinning: false, air: true, dig: 0 }));
+    this.wheelState = this.wheelDefs.map(() => ({ grip: 0, load: 0, surface: 'air', spinning: false, air: true, dig: 0 }));
     this.lastSpinMsg = -10;
     this.lastBrakeMsg = -10;
     this.nextItemId = 1;
@@ -188,12 +184,11 @@ export class Sim {
 
   // ---------------------------------------------------------------- car
   _buildCar() {
-    const chassis = new Body({ mass: 1000 });
-    // lower body (up to the hood line) + cabin; matches the real side profile closely enough for collisions
-    chassis.addShape(new Box(new Vec3(0.7375, 0.4525, 1.7)), new Vec3(0, -0.1225, 0));
-    chassis.addShape(new Box(new Vec3(0.7375, 0.3825, 0.945)), new Vec3(0, 0.7125, -0.745));
-    chassis.position.set(3.75, 0.55, 0);
-    chassis.quaternion.setFromEuler(0, this.level.yaw, -Math.atan2(this.level.depth, 1.295) * 0.95);
+    const car = this.car;
+    const chassis = new Body({ mass: car.mass });
+    for (const sh of car.shapes) chassis.addShape(new Box(new Vec3(...sh.half)), new Vec3(...sh.at)); // lower body + cabin
+    chassis.position.set(3.75, car.spawnY, 0);
+    chassis.quaternion.setFromEuler(0, this.level.yaw, -Math.atan2(this.level.depth, (car.trackF + car.trackR) / 2) * 0.95);
     chassis.collisionFilterGroup = 1;
     chassis.collisionFilterMask = ~2; // do not collide with thin placed items
     chassis.linearDamping = 0.05;
@@ -207,7 +202,7 @@ export class Sim {
       indexForwardAxis: 2,
     });
     const opts = {
-      radius: 0.28,
+      radius: car.tireR,
       directionLocal: new Vec3(0, -1, 0),
       axleLocal: new Vec3(-1, 0, 0),
       suspensionStiffness: 28,
@@ -221,8 +216,8 @@ export class Sim {
       customSlidingRotationalSpeed: -30,
       useCustomSlidingRotationalSpeed: true,
     };
-    for (const w of WHEEL_DEFS) {
-      this.vehicle.addWheel({ ...opts, chassisConnectionPointLocal: new Vec3(w.x, -0.3, w.z) });
+    for (const w of this.wheelDefs) {
+      this.vehicle.addWheel({ ...opts, chassisConnectionPointLocal: new Vec3(w.x, car.connY, w.z) });
     }
   }
 
@@ -272,7 +267,7 @@ export class Sim {
   }
 
   hookWorld() {
-    return this.chassis.pointToWorldFrame(HOOK_LOCAL);
+    return this.chassis.pointToWorldFrame(this.hookLocal);
   }
 
   /** ray straight down at (x,z) from y+2; ignores chassis. */
@@ -307,14 +302,14 @@ export class Sim {
     const ch = this.chassis;
 
     // steering (positive = left)
-    this.steer += (inp.steer * MAX_STEER - this.steer) * Math.min(1, dt * 6);
+    this.steer += (inp.steer * this.car.steerMax - this.steer) * Math.min(1, dt * 6);
     v.setSteeringValue(this.steer, 0);
     v.setSteeringValue(this.steer, 1);
 
     // per-wheel surface + load
     const N = [];
     const L = [];
-    WHEEL_DEFS.forEach((_, i) => {
+    this.wheelDefs.forEach((_, i) => {
       const wi = v.wheelInfos[i];
       const hitBody = wi.raycastResult.body;
       const inContact = wi.isInContact && hitBody;
@@ -345,11 +340,11 @@ export class Sim {
       const fwd = ch.vectorToWorldFrame(new Vec3(0, 0, 1));
       const sp = ch.velocity.dot(fwd);
       const lim = sp * Math.sign(thr) > 0 ? Math.max(0, 1 - Math.abs(sp) / MAX_SPEED) : 1;
-      total = ENGINE_FORCE * Math.abs(thr) * lim;
+      total = this.car.engineForce * Math.abs(thr) * lim;
     }
     const axles = [
-      [0, 1, SHARE_FRONT],
-      [2, 3, 1 - SHARE_FRONT],
+      [0, 1, this.car.shareFront],
+      [2, 3, 1 - this.car.shareFront],
     ];
     const each = [0, 0, 0, 0];
     let limited = false;
@@ -367,7 +362,7 @@ export class Sim {
       const lw = Math.min(la, lb);
       const ls = Math.max(la, lb);
       const fw = Math.min(want, lw);
-      const fs = Math.min(2 * want - fw, ls, DIFF_BIAS * fw);
+      const fs = Math.min(2 * want - fw, ls, this.car.diffBias * fw);
       each[weak] = fw;
       each[strong] = fs;
       if (this.sideBrake && a >= 2) each[a] = each[b] = 0; // rear axle is locked
@@ -383,7 +378,7 @@ export class Sim {
       v.wheelInfos[3].frictionSlip *= 0.45;
     }
     const sign = -(Math.sign(thr) || 0); // cannon-es: negative engineForce drives toward the axle-cross-normal direction (+Z here)
-    WHEEL_DEFS.forEach((_, i) => {
+    this.wheelDefs.forEach((_, i) => {
       v.applyEngineForce(sign * each[i], i);
       // brakes act only when no engine force
       const rear = i >= 2;
@@ -399,7 +394,7 @@ export class Sim {
     }
 
     // ---- digging in: spinning on soft ground digs a rut; the tyre sinks, loses grip and drags
-    WHEEL_DEFS.forEach((_, i) => {
+    this.wheelDefs.forEach((_, i) => {
       const st = this.wheelState[i];
       const wi = v.wheelInfos[i];
       const soft = st.surface === 'mud' ? 1 : st.surface === 'grass' ? 0.3 : 0;
@@ -413,7 +408,7 @@ export class Sim {
       wi.suspensionRestLength = BASE_REST - this.dig[i] * DIG_SINK;
       if (this.dig[i] > 0.5 && !this.digWarned[i]) {
         this.digWarned[i] = true;
-        this.say(`${WHEEL_DEFS[i].name}タイヤが泥を掘って沈んでいる! 空転を止めて板を噛ませよう`, 'warn');
+        this.say(`${this.wheelDefs[i].name}タイヤが泥を掘って沈んでいる! 空転を止めて板を噛ませよう`, 'warn');
       }
       if (this.dig[i] < 0.2) this.digWarned[i] = false;
       if (soft && N[i] > 0 && hs > 0.02) {
@@ -599,10 +594,10 @@ export class Sim {
     const wp = wi.worldTransform.position;
     const f = this.forwardH();
     const right = new Vec3(-f.z, 0, f.x);
-    const inside = WHEEL_DEFS[wheelIdx].x > 0 ? right.clone() : right.scale(-1);
+    const inside = this.wheelDefs[wheelIdx].x > 0 ? right.clone() : right.scale(-1);
     const dd = PLACE_DIRS[dirKey];
     let dir;
-    let offset = 0.28 + spec.half[2];
+    let offset = this.car.tireR + spec.half[2];
     if (dd.angle === null) {
       dir = f.clone();
       offset = 0;
@@ -619,7 +614,7 @@ export class Sim {
       return false;
     }
     this._spawnItem(kind, hit, dir, wheelIdx);
-    this.say(`${WHEEL_DEFS[wheelIdx].name}タイヤの${dd.label}に${spec.label}を置いた`, 'info');
+    this.say(`${this.wheelDefs[wheelIdx].name}タイヤの${dd.label}に${spec.label}を置いた`, 'info');
     return true;
   }
 
@@ -648,7 +643,7 @@ export class Sim {
   _underRule(kind, wheelIdx) {
     if (kind === 'mat') return 'フロアマットはタイヤの真下には敷けない';
     if (kind === 'helper' && !this.wheelState[wheelIdx].air) {
-      return `${WHEEL_DEFS[wheelIdx].name}タイヤが接地している: ヘルパーは浮いたタイヤの下にしか挟めない(ジャッキで浮かせる)`;
+      return `${this.wheelDefs[wheelIdx].name}タイヤが接地している: ヘルパーは浮いたタイヤの下にしか挟めない(ジャッキで浮かせる)`;
     }
     return null;
   }
@@ -693,7 +688,7 @@ export class Sim {
       return false;
     }
     this._spawnItem(kind, pv.hit, pv.dir, pv.wheel);
-    this.say(`${WHEEL_DEFS[pv.wheel].name}タイヤの近くに${ITEM_SPECS[kind].label}を置いた`, 'info');
+    this.say(`${this.wheelDefs[pv.wheel].name}タイヤの近くに${ITEM_SPECS[kind].label}を置いた`, 'info');
     return true;
   }
 
@@ -701,12 +696,12 @@ export class Sim {
   _recoverBlock(it) {
     const [hx, , hz] = ITEM_SPECS[it.kind].half;
     const inv = it.body.quaternion.inverse();
-    for (let i = 0; i < WHEEL_DEFS.length; i++) {
+    for (let i = 0; i < this.wheelDefs.length; i++) {
       if (this.wheelState[i].air) continue; // a lifted tyre is not pressing on anything
       const wp = this.vehicle.wheelInfos[i].worldTransform.position;
       const l = inv.vmult(wp.vsub(it.body.position));
       if (Math.abs(l.x) <= hx + 0.1 && Math.abs(l.z) <= hz + 0.12 && Math.abs(l.y) < 0.45) {
-        return `${WHEEL_DEFS[i].name}タイヤが乗っていて${ITEM_SPECS[it.kind].label}が抜けない`;
+        return `${this.wheelDefs[i].name}タイヤが乗っていて${ITEM_SPECS[it.kind].label}が抜けない`;
       }
     }
     const under = this.items.some((o) => o !== it && o.body.position.y > it.body.position.y + 0.01

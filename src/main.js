@@ -3,12 +3,14 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { buildCar } from './carModel.js';
+import { buildImpreza } from './carImpreza.js';
 import { GameAudio } from './audio.js';
-import { Sim, LEVELS, TREES, WHEEL_DEFS, PLACE_DIRS, ITEM_SPECS, SURFACE_LABEL } from './sim.js';
+import { Sim, LEVELS, CARS, TREES, WHEEL_DEFS, PLACE_DIRS, ITEM_SPECS, SURFACE_LABEL } from './sim.js';
 
 const $ = (id) => document.getElementById(id);
 let levelKey = 'hard';
-const makeSim = () => new Sim({ level: levelKey });
+let carKey = 'nbox';
+const makeSim = () => new Sim({ level: levelKey, car: carKey });
 let sim = makeSim();
 const audio = new GameAudio();
 let lastRatchet = 0;
@@ -93,9 +95,25 @@ buildTerrain();
 // ------------------------------------------------------------------ car (blue N-BOX Custom, see carModel.js)
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envMap = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-const { group: car, wheels: wheelMeshes } = buildCar(envMap, WHEEL_DEFS);
-scene.add(car);
-wheelMeshes.forEach((w) => scene.add(w));
+const CAR_BUILDERS = { nbox: buildCar, impreza: buildImpreza };
+let car;
+let wheelMeshes = [];
+function loadCarModel() {
+  if (car) {
+    scene.remove(car);
+    wheelMeshes.forEach((w) => scene.remove(w));
+  }
+  const built = CAR_BUILDERS[sim.car.id](envMap, sim.wheelDefs);
+  car = built.group;
+  wheelMeshes = built.wheels;
+  scene.add(car);
+  wheelMeshes.forEach((w) => scene.add(w));
+  const title = document.getElementById('cartitle');
+  if (title) title.textContent = sim.car.label.toUpperCase();
+  audio.configure(sim.car.audio);
+}
+
+loadCarModel();
 
 // ------------------------------------------------------------------ mud spray + dirty tyres
 const MAX_P = 600;
@@ -234,6 +252,16 @@ const dirBtns = DIR_ORDER.map((k, i) => {
   return b;
 });
 
+const carBtns = Object.entries(CARS).map(([k, c]) => {
+  const b = document.createElement('button');
+  b.className = 'tb';
+  b.textContent = c.short ?? c.label;
+  b.title = c.note;
+  b.onclick = () => { carKey = k; reset(); };
+  $('cars').appendChild(b);
+  return [k, b];
+});
+
 const levelBtns = Object.entries(LEVELS).map(([k, lv]) => {
   const b = document.createElement('button');
   b.className = 'tb';
@@ -345,6 +373,7 @@ function updateHud() {
   $('b-side').classList.toggle('on', h.sideBrake);
   $('brakeinfo').textContent = h.sideBrake ? 'サイド: 後輪ロック中' : h.autoHold ? 'オートホールド作動' : '停車中は自動で保持';
   levelBtns.forEach(([k, b]) => b.classList.toggle('on', k === levelKey));
+  carBtns.forEach(([k, b]) => b.classList.toggle('on', k === carKey));
   $('b-jack').classList.toggle('on', !!h.jack || armed === 'jack');
   $('b-rope').classList.toggle('on', !!h.rope);
   $('jackinfo').textContent = h.jack
@@ -462,6 +491,7 @@ syncToolsHeight();
 // ------------------------------------------------------------------ main loop
 function reset() {
   sim = makeSim();
+  loadCarModel();
   buildTerrain();
   lastRatchet = 0;
   armed = null;
@@ -489,7 +519,7 @@ function syncCar() {
   truck.position.set(-1.2, 0, sim.truckZ);
 
   if (sim.rope) {
-    const a = car.localToWorld(new THREE.Vector3(0, -0.45, 1.72));
+    const a = car.localToWorld(new THREE.Vector3(...sim.car.hook));
     const b = new THREE.Vector3(-1.2, 0.55, sim.truckZ - 1.7);
     ropeMesh.visible = true;
     setCylinder(ropeMesh, a, b);
@@ -554,7 +584,7 @@ function frame(now) {
 }
 
 $('loading').remove();
-sim.say('N-BOXの左輪が側溝のぬかるみに落ちた。道具を使って脱出しよう', 'info');
+sim.say(`${sim.car.label}の左輪が側溝のぬかるみに落ちた。道具を使って脱出しよう`, 'info');
 sim.say('音が出ない時は、何かキーを押す(M でミュート)', 'info');
 sim.say('まずは 1-4 でタイヤを選び、Q/E で道具を置く', 'info');
 requestAnimationFrame(frame);

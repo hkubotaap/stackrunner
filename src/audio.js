@@ -5,11 +5,23 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 export class GameAudio {
   constructor() {
+    this.spec = { firing: 1.5, turbo: true, boxer: false, idle: 780, thr: 3300, speed: 1600 };
     this.ctx = null;
     this.muted = false;
     this.rpm = 800;
     this.truckRpm = 900;
     this.lastRopeFlutter = 0;
+  }
+
+  /** Engine character of the selected car (cylinder count, turbo, boxer burble, rev behaviour). */
+  configure(spec) {
+    this.spec = spec;
+    this.rpm = spec.idle;
+    if (!this.ctx) return;
+    this.eng.firing = spec.firing;
+    // unequal-length exhaust of a boxer: a lumpy, burbling idle instead of the even 3-cyl wobble
+    this.eng.lfo.frequency.value = spec.boxer ? 11.5 : 5.3;
+    this.eng.lfoG.gain.value = spec.boxer ? 0.2 : 0.08;
   }
 
   /** must be called from a user gesture */
@@ -53,6 +65,7 @@ export class GameAudio {
     // ---- player engine
     this.eng = this._buildEngine(1.0);
     this.eng.out.connect(this.master);
+    this.configure(this.spec);
     // intake / mechanical hiss
     this.hiss = ctx.createGain();
     this.hiss.gain.value = 0;
@@ -148,12 +161,12 @@ export class GameAudio {
     sq.start();
     sub.start();
     lfo.start();
-    return { saw, sq, sub, lp, out, pitchScale };
+    return { saw, sq, sub, lp, out, pitchScale, lfo, lfoG, firing: 1.5 };
   }
 
   _setEngine(e, rpm, load, level) {
     const t = this.ctx.currentTime;
-    const f = (rpm / 60) * 1.5 * e.pitchScale; // firing frequency
+    const f = (rpm / 60) * e.firing * e.pitchScale; // firing frequency: 3-cyl 1.5 / 4-cyl 2.0 per crank turn
     e.saw.frequency.setTargetAtTime(f, t, 0.03);
     e.sq.frequency.setTargetAtTime(f * 2, t, 0.03);
     e.sub.frequency.setTargetAtTime(f * 0.5, t, 0.03);
@@ -172,8 +185,9 @@ export class GameAudio {
     const nSpin = spinning.length;
 
     // CVT: revs follow throttle quickly, speed adds a little; spinning wheels let revs flare
-    let target = 780 + thr * 3300 + clamp(spd / 15, 0, 1) * 1600 + (nSpin ? 1100 * thr : 0);
-    if (h.vsaCut) target = 780 + thr * 1200; // traction control chokes the engine
+    const sp = this.spec;
+    let target = sp.idle + thr * sp.thr + clamp(spd / 15, 0, 1) * sp.speed + (nSpin ? 1100 * thr : 0);
+    if (h.vsaCut) target = sp.idle + thr * 1200; // traction control chokes the engine
     const k = target > this.rpm ? 5 : 2.5;
     this.rpm += (target - this.rpm) * Math.min(1, dt * k);
     this.rpm += (Math.random() - 0.5) * 14; // idle jitter
@@ -181,7 +195,7 @@ export class GameAudio {
     this._setEngine(this.eng, this.rpm, load, this.muted ? 0 : 0.16 + thr * 0.1);
     this.hiss.gain.setTargetAtTime(this.muted ? 0 : thr * 0.012 * (this.rpm / 3000), t, 0.1);
     this.turbo.frequency.setTargetAtTime(2400 + this.rpm * 0.9, t, 0.08);
-    this.turboGain.gain.setTargetAtTime(this.muted ? 0 : clamp((this.rpm - 2300) / 2500, 0, 1) * thr * 0.012, t, 0.12);
+    this.turboGain.gain.setTargetAtTime(this.muted ? 0 : clamp((this.rpm - 2300) / 2500, 0, 1) * thr * 0.012 * (sp.turbo ? 1 : 0), t, 0.12);
 
     // tyres
     const mudSpin = spinning.filter((w) => w.surface === 'mud').length;
