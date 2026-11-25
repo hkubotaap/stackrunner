@@ -1,0 +1,15 @@
+{
+  "name": "stackrunner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "N-BOX stuck escape physics game (3D prototype)",
+  "scripts": {
+    "start": "python -m http.server 8080",
+    "test": "node tests/headless-sim.mjs"
+  },
+  "dependencies": {
+    "cannon-es": "0.20.0",
+    "three": "0.160.1"
+  }
+}
