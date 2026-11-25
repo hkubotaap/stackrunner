@@ -12,6 +12,7 @@ const makeSim = () => new Sim({ level: levelKey });
 let sim = makeSim();
 const audio = new GameAudio();
 let lastRatchet = 0;
+let armed = null; // 'helper' | 'mat' | 'jack' : click / tap on the ground to use it
 
 // ------------------------------------------------------------------ renderer / scene
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -242,6 +243,11 @@ const levelBtns = Object.entries(LEVELS).map(([k, lv]) => {
   return [k, b];
 });
 
+function arm(tool) {
+  armed = armed === tool ? null : tool;
+  if (armed && armed !== 'jack' && sim.stock[armed] <= 0) { armed = null; sim.say('もう無い', 'warn'); }
+}
+
 const act = {
   helper: () => sim.placeItem('helper', selWheel, DIR_ORDER[dirIdx]),
   mat: () => sim.placeItem('mat', selWheel, DIR_ORDER[dirIdx]),
@@ -251,10 +257,10 @@ const act = {
   vsa: () => sim.toggleVsa(),
   reset: () => reset(),
 };
-$('b-helper').onclick = act.helper;
-$('b-mat').onclick = act.mat;
+$('b-helper').onclick = () => arm('helper');
+$('b-mat').onclick = () => arm('mat');
 $('b-recover').onclick = act.recover;
-$('b-jack').onclick = act.jack;
+$('b-jack').onclick = () => (sim.jack ? act.jack() : arm('jack'));
 $('b-rope').onclick = act.rope;
 $('vsa').onclick = act.vsa;
 $('b-reset').onclick = act.reset;
@@ -323,7 +329,15 @@ function updateHud() {
   $('misc').innerHTML = `経過 ${h.time.toFixed(0)}s ・ ミス ${h.misses}<br>` +
     `スノーヘルパー残 ${h.stock.helper} / フロアマット残 ${h.stock.mat}`;
   $('b-helper').disabled = h.stock.helper <= 0;
+  if (armed && armed !== 'jack' && h.stock[armed] <= 0) armed = null;
   $('b-mat').disabled = h.stock.mat <= 0;
+  $('b-helper').classList.toggle('on', armed === 'helper');
+  $('b-mat').classList.toggle('on', armed === 'mat');
+  const hint = $('armhint');
+  hint.style.display = armed ? 'block' : 'none';
+  hint.textContent = armed === 'jack' ? 'ジャッキを置くタイヤをクリック/タップ(ボタンをもう一度押すと解除)'
+    : armed ? (armed === 'helper' ? 'スノーヘルパー' : 'フロアマット') + 'を置く場所をクリック/タップ(ボタンをもう一度押すと解除)' : '';
+  renderer.domElement.classList.toggle('armed', !!armed);
   dirBtns.forEach((b, i) => b.classList.toggle('on', i === dirIdx));
   $('l-side').className = h.sideBrake ? 'on' : '';
   $('l-foot').className = h.footBrake ? 'on' : '';
@@ -331,7 +345,7 @@ function updateHud() {
   $('b-side').classList.toggle('on', h.sideBrake);
   $('brakeinfo').textContent = h.sideBrake ? 'サイド: 後輪ロック中' : h.autoHold ? 'オートホールド作動' : '停車中は自動で保持';
   levelBtns.forEach(([k, b]) => b.classList.toggle('on', k === levelKey));
-  $('b-jack').classList.toggle('on', !!h.jack);
+  $('b-jack').classList.toggle('on', !!h.jack || armed === 'jack');
   $('b-rope').classList.toggle('on', !!h.rope);
   $('jackinfo').textContent = h.jack
     ? `${WHEEL_DEFS[h.jack.wheel].name}: 高さ ${(h.jack.lift * 100).toFixed(0)}cm${h.jack.soft ? ' / 沈下中' : ''}${h.jack.unstable ? ' / 傾斜面!' : ''}`
@@ -351,11 +365,106 @@ function updateHud() {
   } else end.style.display = 'none';
 }
 
+// ------------------------------------------------------------------ mouse / tap placement
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const pointer = { x: 0, y: 0, inside: false, down: null, active: new Set() };
+function pickGround(cx, cy) {
+  ndc.set((cx / innerWidth) * 2 - 1, -(cy / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects([...terrainGroup.children, ...itemMeshes.values()], false)[0];
+  return hit ? hit.point : null;
+}
+const ghostMat = new THREE.MeshBasicMaterial({ color: 0x4cd08a, transparent: true, opacity: 0.55, depthWrite: false });
+const ghost = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), ghostMat);
+ghost.visible = false;
+scene.add(ghost);
+const hoverRing = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.03, 8, 40).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x4cd08a }));
+hoverRing.visible = false;
+scene.add(hoverRing);
+
+function updateGhost() {
+  ghost.visible = false;
+  hoverRing.visible = false;
+  if (!armed || !pointer.inside) return;
+  const pt = pickGround(pointer.x, pointer.y);
+  if (!pt) return;
+  if (armed === 'jack') {
+    const nw = sim.nearestWheel(pt.x, pt.z);
+    const wp = sim.vehicle.wheelInfos[nw.wheel].worldTransform.position;
+    hoverRing.visible = true;
+    hoverRing.position.set(wp.x, wp.y - 0.2, wp.z);
+    hoverRing.material.color.setHex(nw.dist < 1.4 ? 0x4cd08a : 0xff5d5d);
+    return;
+  }
+  const spec = ITEM_SPECS[armed];
+  const pv = sim.previewAt(armed, pt.x, pt.z);
+  ghost.visible = true;
+  ghost.scale.set(spec.half[0] * 2, spec.half[1] * 2 + 0.01, spec.half[2] * 2);
+  ghostMat.color.setHex(pv.ok ? 0x4cd08a : 0xff5d5d);
+  if (pv.ok) {
+    const n = new THREE.Vector3(pv.hit.hitNormalWorld.x, pv.hit.hitNormalWorld.y, pv.hit.hitNormalWorld.z);
+    const qTilt = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
+    const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(pv.dir.x, pv.dir.z));
+    ghost.quaternion.copy(qTilt.multiply(qYaw));
+    ghost.position.set(pv.hit.hitPointWorld.x, pv.hit.hitPointWorld.y, pv.hit.hitPointWorld.z).addScaledVector(n, spec.half[1]);
+  } else {
+    ghost.quaternion.identity();
+    ghost.position.set(pt.x, pt.y + 0.02, pt.z);
+  }
+}
+
+function handleTap(cx, cy) {
+  const pt = pickGround(cx, cy);
+  if (!pt) return;
+  const nw = sim.nearestWheel(pt.x, pt.z);
+  if (armed === 'jack') {
+    if (nw.dist < 1.4) { selWheel = nw.wheel; sim.toggleJack(nw.wheel); armed = null; } else sim.say('タイヤの近くをタップしてください', 'warn');
+  } else if (armed) {
+    sim.placeItemAt(armed, pt.x, pt.z);
+  } else if (nw.dist < 0.9) {
+    selWheel = nw.wheel; // tap a tyre to select it
+  }
+}
+
+const canvas = renderer.domElement;
+canvas.addEventListener('pointerdown', (e) => {
+  pointer.active.add(e.pointerId);
+  pointer.down = pointer.active.size === 1 ? { x: e.clientX, y: e.clientY, t: performance.now() } : null; // multi-touch = camera gesture
+  pointer.x = e.clientX; pointer.y = e.clientY; pointer.inside = true;
+});
+canvas.addEventListener('pointermove', (e) => {
+  pointer.x = e.clientX; pointer.y = e.clientY; pointer.inside = true;
+  if (pointer.down && Math.hypot(e.clientX - pointer.down.x, e.clientY - pointer.down.y) > 7) pointer.down = null; // it is a drag
+});
+canvas.addEventListener('pointerleave', () => { pointer.inside = false; });
+for (const ev of ['pointerup', 'pointercancel']) {
+  canvas.addEventListener(ev, (e) => {
+    pointer.active.delete(e.pointerId);
+    const d = pointer.down;
+    pointer.down = null;
+    if (ev === 'pointerup' && d && performance.now() - d.t < 600) handleTap(e.clientX, e.clientY);
+    if (e.pointerType === 'touch') pointer.inside = false;
+  });
+}
+
+// on-screen driving pads (touch devices)
+for (const b of document.querySelectorAll('#touch button')) {
+  const key = b.dataset.key;
+  b.addEventListener('pointerdown', (e) => { e.preventDefault(); b.setPointerCapture(e.pointerId); held.add(key); b.classList.add('down'); audio.start(); });
+  for (const ev of ['pointerup', 'pointercancel']) b.addEventListener(ev, () => { held.delete(key); b.classList.remove('down'); });
+}
+const toolsEl = $('tools');
+const syncToolsHeight = () => document.documentElement.style.setProperty('--tools-h', `${toolsEl.offsetHeight}px`);
+new ResizeObserver(syncToolsHeight).observe(toolsEl);
+syncToolsHeight();
+
 // ------------------------------------------------------------------ main loop
 function reset() {
   sim = makeSim();
   buildTerrain();
   lastRatchet = 0;
+  armed = null;
   dirt.fill(0);
   pLife.fill(0);
   pPos.fill(-1000);
@@ -424,6 +533,7 @@ function frame(now) {
   } else lastRatchet = 0;
   syncCar();
   updateMud(dt);
+  updateGhost();
   updateHud();
   audio.update(sim.getHud(), dt, {
     truckDist: camera.position.distanceTo(truck.position),

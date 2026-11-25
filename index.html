@@ -65,6 +65,20 @@
   button.tb kbd { margin-left: 6px; padding: 0 4px; border-radius: 3px; background: rgba(0,0,0,.35); color: var(--dim); font-size: 11px; }
   #jackinfo, #ropeinfo, #brakeinfo { color: var(--dim); font-size: 12px; min-height: 1.4em; }
 
+  #armhint { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); padding: 7px 14px; border-radius: 99px;
+    background: rgba(255,176,32,.92); color: #111; font-weight: 700; display: none; pointer-events: none; z-index: 6; max-width: 92vw; text-align: center; }
+  canvas.armed { cursor: crosshair; }
+  #touch { display: none; position: fixed; left: 0; right: 0; bottom: calc(var(--tools-h, 150px) + 18px); pointer-events: none;
+    justify-content: space-between; padding: 0 14px; z-index: 5; }
+  #touch .pad { display: flex; gap: 10px; pointer-events: auto; }
+  #touch button { width: 64px; height: 64px; border-radius: 16px; border: 1px solid var(--line); background: rgba(14,18,24,.72);
+    color: var(--text); font: inherit; font-size: 22px; touch-action: none; user-select: none; }
+  #touch button.down { background: rgba(255,176,32,.55); color: #111; }
+  @media (pointer: coarse) {
+    #touch { display: flex; }
+    #help { display: none; }
+    #tools { max-height: 38vh; overflow: auto; }
+  }
   #help { bottom: 12px; left: 12px; color: var(--dim); line-height: 1.7; font-size: 12px; max-width: 250px; }
   #help b { color: var(--text); font-weight: 600; }
 
@@ -86,6 +100,12 @@
 <body>
 <div id="loading">読み込み中…</div>
 
+<div id="armhint"></div>
+<div id="touch">
+  <div class="pad"><button data-key="KeyA" aria-label="左">◀</button><button data-key="KeyD" aria-label="右">▶</button></div>
+  <div class="pad"><button data-key="ShiftLeft" aria-label="ブレーキ" style="font-size:13px">BRAKE</button><button data-key="KeyS" aria-label="後退">▼</button><button data-key="KeyW" aria-label="前進">▲</button></div>
+</div>
+
 <div id="car" class="panel">
   <h2>N-BOX CUSTOM 4WD</h2>
   <div id="speedrow"><span id="speed">0</span><small>km/h</small><span id="gear"></span>
@@ -99,13 +119,14 @@
 
 <div id="tools" class="panel">
   <div class="grp">
-    <h2>置く向き (選択タイヤ基準) <span style="letter-spacing:0">[F]</span></h2>
-    <div class="row" id="dirs"></div>
+    <h2>道具: ボタンで選んで地面をクリック/タップ</h2>
     <div class="row">
       <button class="tb" id="b-helper">スノーヘルパー<kbd>Q</kbd></button>
       <button class="tb" id="b-mat">フロアマット<kbd>E</kbd></button>
       <button class="tb" id="b-recover">回収<kbd>⌫</kbd></button>
     </div>
+    <h2 style="margin-top:4px">キー Q/E は向き指定で即配置 <span style="letter-spacing:0">[F で切替]</span></h2>
+    <div class="row" id="dirs"></div>
   </div>
   <div class="grp">
     <h2>ジャッキ</h2>
@@ -142,6 +163,7 @@
 <div id="help" class="panel">
   <b>W/S</b> 前進・後退 &nbsp; <b>A/D</b> ハンドル<br>
   <b>Shift</b> フットブレーキ &nbsp; <b>Space</b> サイドブレーキ(後輪ロック)<br>
+  <b>クリック/タップ</b> 道具を置く・タイヤ選択<br>
   <b>1-4</b> タイヤ選択 &nbsp; <b>V</b> VSA切替 &nbsp; <b>M</b> ミュート<br>
   ドラッグで視点回転 / ホイールでズーム
 </div>

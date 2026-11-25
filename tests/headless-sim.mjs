@@ -106,6 +106,77 @@ cases.push(
   ['a tyre that never touched mud does not dig', () => digger.dig.every((d, k) => touchedMud[k] || d === 0), true],
 );
 
+// ---- rule: floor mats cannot go directly under a tyre
+const ruleCar = new Sim({ level: 'hard' });
+const matUnder = ruleCar.placeItem('mat', 0, 'under');
+const matFront = ruleCar.placeItem('mat', 0, 'front');
+const helperUnderGrounded = ruleCar.placeItem('helper', 0, 'under');
+cases.push(
+  ['floor mat under a tyre is refused and keeps its stock', () => matUnder === false && ruleCar.stock.mat === 3, true],
+  ['floor mat elsewhere is still allowed', () => matFront, true],
+  ['helper under a grounded tyre is refused and keeps its stock', () => helperUnderGrounded === false && ruleCar.stock.helper === 2, true],
+);
+// lift the front-left tyre with the jack: now a helper can be wedged under it, a mat still cannot
+const lift = new Sim({ level: 'hard' });
+lift.toggleJack(0);
+for (let i = 0; i < 6 * 60; i++) { lift.jackMove(1, 1 / 60); lift.update(1 / 60); }
+const liftedAir = lift.wheelState[0].air;
+const wp = lift.vehicle.wheelInfos[0].worldTransform.position;
+const tapHelperLifted = lift.previewAt('helper', wp.x, wp.z).ok;
+const tapMatLifted = lift.previewAt('mat', wp.x, wp.z);
+const groundedIdx = lift.wheelState.findIndex((w) => !w.air); // jacking one corner also floats others
+const gp = lift.vehicle.wheelInfos[groundedIdx].worldTransform.position;
+const tapHelperGrounded = lift.previewAt('helper', gp.x, gp.z);
+const keyHelperLifted = lift.placeItem('helper', 0, 'under');
+cases.push(
+  ['jack lifts the tyre off the ground', () => liftedAir, true],
+  ['helper may be wedged under a lifted tyre (key + tap)', () => tapHelperLifted && keyHelperLifted, true],
+  ['floor mat is refused even under a lifted tyre', () => tapMatLifted.ok === false, true],
+  ['tap under a grounded tyre is refused for a helper', () => tapHelperGrounded.ok === false && /接地/.test(tapHelperGrounded.reason), true],
+);
+
+// ---- mouse / tap placement rules
+const tap = new Sim({ level: 'hard' });
+const wp0 = tap.vehicle.wheelInfos[0].worldTransform.position; // front-left tyre, in the ditch
+const nearX = wp0.x - 0.9; // 0.9 m toward the road: valid reach, clear of the tyre
+const pvHelper = tap.previewAt('helper', nearX, wp0.z + 0.3);
+const pvMatUnder = tap.previewAt('mat', wp0.x, wp0.z);
+const pvMatNear = tap.previewAt('mat', nearX, wp0.z + 0.3);
+const pvFar = tap.previewAt('helper', wp0.x + 9, wp0.z);
+const placed = tap.placeItemAt('helper', nearX, wp0.z + 0.3);
+const stacked = tap.placeItemAt('helper', nearX, wp0.z + 0.3); // second one lands on top of the first
+const outOfStock = tap.placeItemAt('helper', nearX, wp0.z + 0.3);
+cases.push(
+  ['tap: helper near a tyre is accepted', () => pvHelper.ok === true, true],
+  ['tap: floor mat directly under a tyre is refused', () => pvMatUnder.ok === false && /真下/.test(pvMatUnder.reason), true],
+  ['tap: floor mat beside the tyre is accepted', () => pvMatNear.ok === true, true],
+  ['tap: too far to reach is refused', () => pvFar.ok === false && /遠すぎ/.test(pvFar.reason), true],
+  ['tap: placing consumes stock and stacks on an existing item', () => placed && stacked && tap.stock.helper === 0 && tap.items.length === 2 && tap.items[1].body.position.y > tap.items[0].body.position.y + 0.03, true],
+  ['tap: no stock left means no placement', () => outOfStock === false, true],
+);
+
+// ---- recovering: a tyre standing on an item pins it
+const pin = new Sim({ level: 'hard' });
+pin.toggleJack(0);
+for (let i = 0; i < 6 * 60; i++) { pin.jackMove(1, 1 / 60); pin.update(1 / 60); }
+pin.placeItem('helper', 0, 'under'); // allowed: the tyre is off the ground
+for (let i = 0; i < 8 * 60; i++) { pin.jackMove(-1, 1 / 60); pin.update(1 / 60); } // lower the car onto the helper
+const standingOn = pin.wheelState[0].surface === 'helper';
+const refused = pin.recoverLastItem();
+const stillThere = pin.items.length === 1;
+for (let i = 0; i < 8 * 60; i++) { pin.jackMove(1, 1 / 60); pin.update(1 / 60); } // lift again: the tyre leaves it
+const freed = pin.recoverLastItem();
+// a free item elsewhere is recovered even though an older one is pinned
+const mix = new Sim({ level: 'hard' });
+mix.placeItem('helper', 0, 'diagFront');
+const mixOk = mix.recoverLastItem() && mix.items.length === 0 && mix.stock.helper === 2;
+cases.push(
+  ['tyre rests on the helper after the jack is lowered', () => standingOn, true],
+  ['an item with a tyre on it cannot be recovered', () => refused === false && stillThere, true],
+  ['it can be recovered once the tyre is lifted off again', () => freed === true && pin.items.length === 0, true],
+  ['a free item is recovered normally and refunded', () => mixOk, true],
+);
+
 let fail = 0;
 for (const [name, fn, expect] of cases) {
   const got = fn();

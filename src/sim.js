@@ -62,6 +62,8 @@ const ROPE_C = 1200;
 const ROPE_BREAK = 6500;
 const TRUCK_PULL_MAX = 2800;
 const JACK_MAX_LIFT = 0.45;
+const ITEM_REACH = 2.4; // m from the nearest tyre: how far the player can reach
+const TYRE_UNDER_CLEARANCE = 0.34; // an item centre closer than this to a tyre counts as 'directly under' it
 const BASE_REST = 0.22; // suspension rest length
 const DIG_RATE = 0.05; // per second at full wheelspin on mud (about 20 s of continuous spin to bury a tyre)
 const DIG_SINK = 0.08; // m the wheel sinks at full dig
@@ -443,7 +445,7 @@ export class Sim {
     }
     const tilt = Math.acos(clamp(hit.hitNormalWorld.y, -1, 1)) * (180 / Math.PI);
     const kind = hit.body.userData?.kind;
-    const padded = kind === 'mat' || kind === 'helper';
+    const padded = kind === 'mat' || kind === 'helper' || this.items.some((it) => Math.hypot(it.body.position.x - wp.x, it.body.position.z - wp.z) < 0.5);
     this.jack = {
       wheel: wheelIdx,
       y0: cp.y,
@@ -559,6 +561,14 @@ export class Sim {
       this.say(`${spec.label}はもう無い`, 'warn');
       return false;
     }
+    // rule: a floor mat cannot be laid directly under a tyre (it gets spat out / shredded)
+    if (dirKey === 'under') {
+      const why = this._underRule(kind, wheelIdx);
+      if (why) {
+        this.say(why, 'warn');
+        return false;
+      }
+    }
     const wi = this.vehicle.wheelInfos[wheelIdx];
     const wp = wi.worldTransform.position;
     const f = this.forwardH();
@@ -582,34 +592,126 @@ export class Sim {
       this.say('そこには置けない', 'warn');
       return false;
     }
+    this._spawnItem(kind, hit, dir, wheelIdx);
+    this.say(`${WHEEL_DEFS[wheelIdx].name}タイヤの${dd.label}に${spec.label}を置いた`, 'info');
+    return true;
+  }
+
+  _spawnItem(kind, hit, dir, wheelIdx) {
+    const spec = ITEM_SPECS[kind];
     const n = hit.hitNormalWorld.clone();
     const qTilt = new Quaternion().setFromVectors(new Vec3(0, 1, 0), n);
     const qYaw = new Quaternion().setFromAxisAngle(new Vec3(0, 1, 0), Math.atan2(dir.x, dir.z));
-    const q = qTilt.mult(qYaw);
     const body = new Body({ mass: 0 });
     body.addShape(new Box(new Vec3(...spec.half)));
     body.position.copy(hit.hitPointWorld.vadd(n.scale(spec.half[1])));
-    body.quaternion.copy(q);
+    body.quaternion.copy(qTilt.mult(qYaw));
     body.collisionFilterGroup = 2; // chassis ignores group 2 (see _buildCar); wheel rays still hit it
     body.userData = { kind, grip: GRIP[kind], item: true, half: spec.half };
     this.world.addBody(body);
     this.stock[kind]--;
     this.items.push({ id: this.nextItemId++, kind, body, wheel: wheelIdx });
     this.emit('place', { kind });
-    this.say(`${WHEEL_DEFS[wheelIdx].name}タイヤの${dd.label}に${spec.label}を置いた`, 'info');
+  }
+
+  /**
+   * Rules for putting something directly under a tyre. Returns the refusal text, or null when allowed.
+   * - floor mat: never under a tyre
+   * - snow helper: only under a tyre that is off the ground (lifted with the jack)
+   */
+  _underRule(kind, wheelIdx) {
+    if (kind === 'mat') return 'フロアマットはタイヤの真下には敷けない';
+    if (kind === 'helper' && !this.wheelState[wheelIdx].air) {
+      return `${WHEEL_DEFS[wheelIdx].name}タイヤが接地している: ヘルパーは浮いたタイヤの下にしか挟めない(ジャッキで浮かせる)`;
+    }
+    return null;
+  }
+
+  /** index of the wheel nearest to world (x,z) and its horizontal distance */
+  nearestWheel(x, z) {
+    let best = 0;
+    let bd = Infinity;
+    this.vehicle.wheelInfos.forEach((wi, i) => {
+      const p = wi.worldTransform.position;
+      const d = Math.hypot(p.x - x, p.z - z);
+      if (d < bd) { bd = d; best = i; }
+    });
+    return { wheel: best, dist: bd };
+  }
+
+  /** Mouse / tap placement: would an item dropped at world (x,z) be accepted, and how would it lie? */
+  previewAt(kind, x, z) {
+    const spec = ITEM_SPECS[kind];
+    if (this.stock[kind] <= 0) return { ok: false, reason: `${spec.label}はもう無い` };
+    const { wheel, dist } = this.nearestWheel(x, z);
+    if (dist > ITEM_REACH) return { ok: false, reason: '遠すぎて手が届かない', wheel };
+    // rule: a floor mat cannot be laid directly under a tyre
+    if (dist < TYRE_UNDER_CLEARANCE) {
+      const why = this._underRule(kind, wheel);
+      if (why) return { ok: false, reason: why, wheel };
+    }
+    const wp = this.vehicle.wheelInfos[wheel].worldTransform.position;
+    // the board lies along the line from the nearest tyre to the tapped point (the way the tyre will roll)
+    const dir = new Vec3(x - wp.x, 0, z - wp.z);
+    if (dir.length() < 0.12) dir.copy(this.forwardH());
+    dir.normalize();
+    const hit = this._ground(x, wp.y, z);
+    if (!hit) return { ok: false, reason: 'そこには置けない', wheel };
+    return { ok: true, wheel, dir, hit };
+  }
+
+  placeItemAt(kind, x, z) {
+    const pv = this.previewAt(kind, x, z);
+    if (!pv.ok) {
+      this.say(pv.reason, 'warn');
+      return false;
+    }
+    this._spawnItem(kind, pv.hit, pv.dir, pv.wheel);
+    this.say(`${WHEEL_DEFS[pv.wheel].name}タイヤの近くに${ITEM_SPECS[kind].label}を置いた`, 'info');
     return true;
   }
 
-  recoverLastItem() {
-    const it = this.items.pop();
-    if (!it) {
-      this.say('回収するものがない', 'warn');
-      return;
+  /** Why this placed item cannot be pulled out right now (null = it can). */
+  _recoverBlock(it) {
+    const [hx, , hz] = ITEM_SPECS[it.kind].half;
+    const inv = it.body.quaternion.inverse();
+    for (let i = 0; i < WHEEL_DEFS.length; i++) {
+      if (this.wheelState[i].air) continue; // a lifted tyre is not pressing on anything
+      const wp = this.vehicle.wheelInfos[i].worldTransform.position;
+      const l = inv.vmult(wp.vsub(it.body.position));
+      if (Math.abs(l.x) <= hx + 0.1 && Math.abs(l.z) <= hz + 0.12 && Math.abs(l.y) < 0.45) {
+        return `${WHEEL_DEFS[i].name}タイヤが乗っていて${ITEM_SPECS[it.kind].label}が抜けない`;
+      }
     }
-    this.world.removeBody(it.body);
-    this.stock[it.kind]++;
-    this.emit('recover');
-    this.say(`${ITEM_SPECS[it.kind].label}を回収した`, 'info');
+    const under = this.items.some((o) => o !== it && o.body.position.y > it.body.position.y + 0.01
+      && Math.hypot(o.body.position.x - it.body.position.x, o.body.position.z - it.body.position.z) < 0.45);
+    if (under) return `上に別の道具が重なっていて${ITEM_SPECS[it.kind].label}が抜けない`;
+    return null;
+  }
+
+  /** Pull out the most recently placed item that is free; items with a tyre on them stay put. */
+  recoverLastItem() {
+    if (!this.items.length) {
+      this.say('回収するものがない', 'warn');
+      return false;
+    }
+    let firstReason = null;
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const it = this.items[i];
+      const why = this._recoverBlock(it);
+      if (why) {
+        firstReason ??= why;
+        continue;
+      }
+      this.items.splice(i, 1);
+      this.world.removeBody(it.body);
+      this.stock[it.kind]++;
+      this.emit('recover');
+      this.say(`${ITEM_SPECS[it.kind].label}を回収した`, 'info');
+      return true;
+    }
+    this.say(`${firstReason}(浮かせるか、タイヤを動かす)`, 'warn');
+    return false;
   }
 
   // ---------------------------------------------------------------- step
