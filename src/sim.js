@@ -86,7 +86,7 @@ export class Sim {
 
     this.time = 0;
     this.input = { throttle: 0, steer: 0, brake: false };
-    this.vsa = true;
+    this.vsa = !!(CARS[opts.car ?? DEFAULT_CAR].vsaName); // cars without a stability / traction control have nothing to switch on
     this.sideBrake = false; // parking brake (electric switch style, latched): locks the rear wheels
     this.autoHold = false;
     this.steer = 0;
@@ -205,7 +205,7 @@ export class Sim {
       radius: car.tireR,
       directionLocal: new Vec3(0, -1, 0),
       axleLocal: new Vec3(-1, 0, 0),
-      suspensionStiffness: 28,
+      suspensionStiffness: car.stiffness ?? 28,
       suspensionRestLength: BASE_REST,
       frictionSlip: 1,
       dampingRelaxation: 2.4,
@@ -291,9 +291,14 @@ export class Sim {
   }
 
   toggleVsa() {
+    const n = this.car.vsaName;
+    if (!n) {
+      this.say(`${this.car.short}には横滑り防止・トラクションコントロール装置がない`, 'info');
+      return;
+    }
     this.vsa = !this.vsa;
     this.emit('vsa');
-    this.say(this.vsa ? 'VSA ON(スリップ時に出力カット)' : 'VSA OFF(出力カットなし)', 'info');
+    this.say(this.vsa ? `${n} ON(スリップ時に出力カット)` : `${n} OFF(出力カットなし)`, 'info');
   }
 
   _preStep(dt) {
@@ -352,7 +357,7 @@ export class Sim {
       const want = (total * share) / 2;
       if (want > Math.min(L[a], L[b]) * 0.97 + 1) limited = true;
     }
-    const vsaCut = this.vsa && limited && thr !== 0;
+    const vsaCut = this.vsa && !!this.car.vsaName && limited && thr !== 0;
     for (const [a, b, share] of axles) {
       const want = ((total * share) / 2) * (vsaCut ? 0.3 : 1);
       const la = L[a] * 0.97;
@@ -390,7 +395,7 @@ export class Sim {
     });
     if (this.limited && thr !== 0 && Math.abs(ch.velocity.length()) < 0.4 && this.time - this.lastSpinMsg > 3.5) {
       this.lastSpinMsg = this.time;
-      this.say(vsaCut ? '空転検知: VSAが出力をカット中' : 'タイヤが空転している', 'warn');
+      this.say(vsaCut ? `空転検知: ${this.car.vsaName}が出力をカット中` : 'タイヤが空転している', 'warn');
     }
 
     // ---- digging in: spinning on soft ground digs a rut; the tyre sinks, loses grip and drags
@@ -762,7 +767,8 @@ export class Sim {
     return {
       speed: this.speedKmh(),
       thr: this.effThrottle ?? this.input.throttle,
-      vsa: this.vsa,
+      vsa: this.vsa && !!this.car.vsaName,
+      vsaName: this.car.vsaName ?? null,
       sideBrake: this.sideBrake,
       footBrake: !!this.input.brake,
       autoHold: this.autoHold,

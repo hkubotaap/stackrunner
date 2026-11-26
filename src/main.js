@@ -4,6 +4,7 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { buildCar } from './carModel.js';
 import { buildImpreza } from './carImpreza.js';
+import { buildHustler } from './carHustler.js';
 import { GameAudio } from './audio.js';
 import { Sim, LEVELS, CARS, TREES, WHEEL_DEFS, PLACE_DIRS, ITEM_SPECS, SURFACE_LABEL } from './sim.js';
 
@@ -95,7 +96,7 @@ buildTerrain();
 // ------------------------------------------------------------------ car (blue N-BOX Custom, see carModel.js)
 const pmrem = new THREE.PMREMGenerator(renderer);
 const envMap = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-const CAR_BUILDERS = { nbox: buildCar, impreza: buildImpreza };
+const CAR_BUILDERS = { nbox: buildCar, impreza: buildImpreza, hustler: buildHustler };
 let car;
 let wheelMeshes = [];
 function loadCarModel() {
@@ -111,6 +112,8 @@ function loadCarModel() {
   const title = document.getElementById('cartitle');
   if (title) title.textContent = sim.car.label.toUpperCase();
   audio.configure(sim.car.audio);
+  const vk = document.getElementById('vsakey');
+  if (vk) vk.textContent = sim.car.vsaName ?? '(この車には装置なし)';
 }
 
 loadCarModel();
@@ -341,7 +344,8 @@ function updateHud() {
   $('speed').textContent = Math.abs(h.speed).toFixed(0);
   $('gear').textContent = h.thr > 0 ? 'D' : h.thr < 0 ? 'R' : 'P/N';
   const v = $('vsa');
-  v.textContent = h.vsa ? 'VSA ON' : 'VSA OFF';
+  v.textContent = h.vsaName ? `${h.vsaName} ${h.vsa ? 'ON' : 'OFF'}` : '横滑り防止なし';
+  v.disabled = !h.vsaName;
   v.className = (h.vsa ? 'on' : '') + (h.vsaCut ? ' cut' : '');
   h.wheels.forEach((w, i) => {
     const r = wheelRows[i];
@@ -389,7 +393,7 @@ function updateHud() {
     end.className = 'panel ' + (h.won ? 'win' : 'lose');
     end.querySelector('h1').textContent = h.won ? '脱出成功!' : '横転…';
     $('endbody').innerHTML = h.won
-      ? `<p>タイム ${h.time.toFixed(0)}秒 ・ ミス ${h.misses}回</p><p>設置中の道具 ${h.itemsUsed}個 ・ VSA ${h.vsa ? 'ON' : 'OFF'}</p>`
+      ? `<p>タイム ${h.time.toFixed(0)}秒 ・ ミス ${h.misses}回</p><p>設置中の道具 ${h.itemsUsed}個 ・ ${h.vsaName ? `${h.vsaName} ${h.vsa ? 'ON' : 'OFF'}` : '横滑り防止なし'}</p>`
       : '<p>車体が傾きすぎました。</p>';
   } else end.style.display = 'none';
 }

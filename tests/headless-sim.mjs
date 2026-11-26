@@ -241,6 +241,69 @@ cases.push(
   ['impreza: stopped by the kei truck', () => impDrive(-1.2, -20, 12) < 0.8, true],
 );
 
+// ---- per-car stability / traction control: the Impreza (2003 2.0 NA) has none, so nothing cuts power
+const noTc = new Sim({ car: 'impreza' });
+const noTcMsg = noTc.vsa;
+noTc.toggleVsa();
+const spin = (car, vsa) => {
+  const s = new Sim({ car, level: 'hard' }); s.vsa = vsa; s.setInput({ throttle: 1, steer: 0, brake: false });
+  for (let i = 0; i < 3 * 60; i++) s.update(1 / 60);
+  return { cut: s.vsaCut, dig: Math.max(...s.dig) };
+};
+cases.push(
+  ['impreza: no traction control (starts off, toggle does nothing, hud shows none)', () => noTcMsg === false && noTc.vsa === false && noTc.getHud().vsa === false && noTc.getHud().vsaName === null, true],
+  ['impreza: power is never cut even if vsa is forced on', () => spin('impreza', true).cut, false],
+  ['nbox: VSA cuts power on wheelspin', () => spin('nbox', true).cut, true],
+  ['hustler: ESP cuts power on wheelspin', () => spin('hustler', true).cut, true],
+);
+
+// ---- Hustler (HYBRID X 4WD): same map and rules, lighter and weaker car
+const hus = new Sim({ car: 'hustler', level: 'hard' });
+const hw = hus.vehicle.wheelInfos.map((w) => w.worldTransform.position);
+function playHus(opts, level = 'hard') {
+  const s = new Sim({ car: 'hustler', level });
+  s.vsa = opts.vsa;
+  (opts.setup ?? (() => {}))(s);
+  let tm = 0;
+  while (tm < (opts.secs ?? 30) && !s.won && !s.flipped) {
+    const f = tm % (opts.fwd + opts.back) < opts.fwd;
+    s.setInput({ throttle: f ? 1 : -1, steer: f ? opts.sf : opts.sb, brake: false });
+    s.update(1 / 30); tm += 1 / 30;
+  }
+  return s.won;
+}
+const husDrive = (x, z, secs) => {
+  const s = new Sim({ car: 'hustler' });
+  s.chassis.position.set(x, 0.9, z); s.chassis.quaternion.set(0, 0, 0, 1);
+  s.chassis.velocity.set(0, 0, 0); s.chassis.angularVelocity.set(0, 0, 0); s.vsa = false;
+  for (let i = 0; i < 120; i++) s.update(1 / 60);
+  s.setInput({ throttle: 1, steer: 0, brake: false });
+  for (let i = 0; i < secs * 60; i++) s.update(1 / 60);
+  return s.chassis.position.z;
+};
+const husJack = new Sim({ car: 'hustler', level: 'hard' });
+const hjw = husJack.vehicle.wheelInfos[0].worldTransform.position;
+husJack.placeItemAt('mat', hjw.x - 0.5, hjw.z);
+husJack.toggleJack(0);
+for (let i = 0; i < 7 * 60; i++) { husJack.jackMove(1, 1 / 60); husJack.update(1 / 60); }
+const hjys = [];
+for (let i = 0; i < 4 * 60; i++) { husJack.update(1 / 60); hjys.push(husJack.cornerWorld(0).y); }
+const husRopeHelpers = (s) => { s.toggleRope(); s.setPulling(true); s.placeItem('helper', 0, 'diagFront'); s.placeItem('helper', 2, 'diagFront'); };
+cases.push(
+  ['hustler: 850 kg, wheelbase 2460 mm', () => hus.chassis.mass === 850 && Math.abs(hw[0].z - hw[2].z - 2.46) < 0.002, true],
+  ['hustler: traction control is labelled ESP (others VSA) and toggles', () => { const e = new Sim({ car: 'hustler' }); const m = new Sim({ car: 'nbox' }); const b = e.vsa; e.toggleVsa(); return e.car.vsaName === 'ESP' && m.car.vsaName === 'VSA' && e.vsa === !b; }, true],
+  ['hustler: starts with the left tyres in the mud, right on asphalt', () => hus.wheelState.map((w) => w.surface).join() === 'mud,road,mud,road', true],
+  ['hustler hard: no item rocking never escapes', () => rockImp.some((r) => playHus(r)), false],
+  ['hustler extreme: no item rocking never escapes', () => rockImp.some((r) => playHus(r, 'extreme')), false],
+  ['hustler hard: rope + helpers + rocking escapes', () => playHus({ vsa: false, fwd: 0.5, back: 0.5, sf: -1, sb: -1, setup: husRopeHelpers }), true],
+  ['hustler extreme: rope + helpers + rocking escapes', () => playHus({ vsa: false, fwd: 0.5, back: 0.5, sf: -1, sb: -1, secs: 60, setup: husRopeHelpers }, 'extreme'), true],
+  ['hustler: floor mat under a tyre is still refused', () => hus.previewAt('mat', hw[0].x, hw[0].z).ok, false],
+  ['hustler: helper under a grounded tyre is still refused', () => hus.previewAt('helper', hw[1].x, hw[1].z).ok, false],
+  ['hustler: jack floats the tyre without bobbing', () => husJack.wheelState[0].air && Math.max(...hjys) - Math.min(...hjys) < 0.015, true],
+  ['hustler: stopped by the tree trunk', () => husDrive(-9, -16, 10) < -7.5, true],
+  ['hustler: stopped by the kei truck', () => husDrive(-1.2, -20, 12) < 1.0, true],
+);
+
 let fail = 0;
 for (const [name, fn, expect] of cases) {
   const got = fn();
