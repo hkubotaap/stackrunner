@@ -304,6 +304,54 @@ cases.push(
   ['hustler: stopped by the kei truck', () => husDrive(-1.2, -20, 12) < 1.0, true],
 );
 
+// ---- winter stage (冬道): snow ridge beside the road, dig it out with the scoop
+const winterSim = (level) => new Sim({ stage: 'winter', level });
+function winterPlay({ level = 'normal', dig = false, rope = false, fw = 0.5, bw = 1, secs = 40, scoopAll = false }) {
+  const s = winterSim(level);
+  s.vsa = false;
+  if (dig) {
+    for (let z = -3.25; z <= 3.75; z += 0.5) {
+      for (const [x, n] of [[4.25, 1], [3.75, 2], [3.25, 2]]) {
+        for (let k = 0; k < n; k++) { s.scoopAt(x, z); s.update(0.5); }
+      }
+    }
+  }
+  if (rope) { s.toggleRope(); s.setPulling(true); }
+  let t = 0;
+  while (t < secs && !s.won && !s.flipped) {
+    const f = t % (fw + bw) < fw;
+    s.setInput({ throttle: f ? 1 : -1, steer: f ? -1 : 1, brake: false });
+    s.update(1 / 60); t += 1 / 60;
+  }
+  return s.won;
+}
+const w0 = winterSim('hard');
+const ridge = w0.cellAt(3.75, 0.25);
+const ridgeH0 = ridge.h;
+const okScoop = w0.scoopAt(3.75, 0.25);
+const ridgeH1 = w0.cellAt(3.75, 0.25).h;
+const swinging = w0.scoopAt(3.75, 0.25); // still swinging: nothing happens
+w0.update(0.6);
+const farScoop = w0.previewScoop(7.6, 4.6);
+const wheelPos = w0.vehicle.wheelInfos[1].worldTransform.position; // front-right tyre
+const tyreScoop = w0.previewScoop(wheelPos.x, wheelPos.z);
+for (let i = 0; i < 4; i++) { w0.scoopAt(3.75, 0.25); w0.update(0.6); }
+const ditchSim = new Sim({ level: 'hard' });
+cases.push(
+  ['winter: car starts with all four tyres on the powder drift', () => w0.wheelState.map((w) => w.surface).join() === 'drift,drift,drift,drift', true],
+  ['winter: scoop removes one layer of the ridge', () => okScoop && Math.abs(ridgeH0 - 0.12 - ridgeH1) < 1e-6, true],
+  ['winter: a second swing right away does nothing', () => swinging === false, true],
+  ['winter: the ridge can be dug down to bare ground (body removed)', () => w0.cellAt(3.75, 0.25).h === 0 && w0.cellAt(3.75, 0.25).body === null, true],
+  ['winter: too far to reach is refused', () => farScoop.ok === false && /遠すぎ/.test(farScoop.reason), true],
+  ['winter: cannot dig under a tyre that is standing on it', () => tyreScoop.ok === false && /タイヤ/.test(tyreScoop.reason), true],
+  ['winter: the scoop does nothing on the ditch stage', () => ditchSim.previewScoop(3.75, 0.25).ok === false, true],
+  ['winter: no digging, rocking never escapes (all levels)', () => ['normal', 'hard', 'extreme'].some((level) => winterPlay({ level, dig: false })), false],
+  ['winter: no digging, rope + rocking never escapes', () => ['normal', 'hard'].some((level) => winterPlay({ level, rope: true })), false],
+  ['winter normal: dig the ridge + rope + rocking escapes', () => winterPlay({ level: 'normal', dig: true, rope: true }), true],
+  ['winter hard: dig the ridge + rope + rocking escapes', () => winterPlay({ level: 'hard', dig: true, rope: true, fw: 0.4, bw: 0.8 }), true],
+  ['winter extreme: dig the ridge + rope + rocking escapes', () => winterPlay({ level: 'extreme', dig: true, rope: true, fw: 0.4, bw: 0.8 }), true],
+);
+
 let fail = 0;
 for (const [name, fn, expect] of cases) {
   const got = fn();

@@ -2,7 +2,8 @@
 // World: +Y up, car faces +Z. Car's LEFT side = +X, RIGHT side = -X.
 // Car spec (Honda N-BOX Custom Turbo 4WD, JF6): 3395x1475x1815mm, WB 2520, track 1295, ground clearance 145,
 // curb weight 1000kg, 658cc turbo 47kW/6000rpm 104Nm/2600rpm, CVT (1st 3.152, final 4.619), 165/55R15.
-// Stage 1: car dropped its left wheels into a mud-bottomed side ditch pocket (x>3).
+// Stages: 'ditch' = car dropped its left wheels into a mud-bottomed side ditch pocket (x>3).
+//         'winter' = car slid off a packed-snow road into a plow berm + powder drift (x>3); dig it out with the scoop.
 import * as CANNON from 'cannon-es';
 import { CARS, DEFAULT_CAR, wheelDefsFor } from './cars.js';
 
@@ -13,24 +14,43 @@ const { Vec3, Quaternion, Body, Box } = CANNON;
 export const DT = 1 / 120;
 
 // How the car fell in: ditch depth (m), pocket half-length (m, limits the run-up), start yaw toward the ditch (rad), mud friction.
+// Winter stage extras: snow = drift depth (m), berm = extra height of the plow ridge beside the road (m), drift = powder grip, wyaw = start yaw (rad).
 export const LEVELS = {
-  normal: { label: '標準', depth: 0.32, pocket: 6, yaw: 0, mud: 0.07 },
-  hard: { label: '高難度', depth: 0.38, pocket: 6, yaw: 0, mud: 0.06 },
-  extreme: { label: '鬼', depth: 0.44, pocket: 6, yaw: 0.2, mud: 0.06 },
+  normal: { label: '標準', depth: 0.32, pocket: 6, yaw: 0, mud: 0.07, snow: 0.18, berm: 0.26, drift: 0.17, wyaw: 0 },
+  hard: { label: '高難度', depth: 0.38, pocket: 6, yaw: 0, mud: 0.06, snow: 0.2, berm: 0.3, drift: 0.15, wyaw: 0 },
+  extreme: { label: '鬼', depth: 0.44, pocket: 6, yaw: 0.2, mud: 0.06, snow: 0.2, berm: 0.32, drift: 0.14, wyaw: 0.1 },
+};
+
+export const STAGES = {
+  ditch: { label: '側溝', goal: ['road'], intro: 'の左輪が側溝のぬかるみに落ちた。道具を使って脱出しよう' },
+  winter: { label: '冬道', goal: ['packed'], intro: 'が除雪の雪山と吹きだまりにはまった。スコップで雪を掘って圧雪路へ戻ろう' },
 };
 
 export const WHEEL_DEFS = wheelDefsFor(CARS[DEFAULT_CAR]); // names / sides; per-car positions: sim.wheelDefs
 
 // friction coefficient per surface kind
-export const GRIP = { road: 1.0, grass: 0.55, mud: 0.07, helper: 1.25, mat: 0.7 };
+export const GRIP = { road: 1.0, grass: 0.55, mud: 0.07, helper: 1.25, mat: 0.7, packed: 0.42, snow: 0.28, drift: 0.13, bare: 0.38 };
+// how soft a surface is: soft tyres dig themselves in when they spin
+const SOFT = { mud: 1, drift: 1, grass: 0.3, snow: 0.3 };
 export const SURFACE_LABEL = {
   road: 'アスファルト',
   grass: '草地',
   mud: 'ぬかるみ',
   helper: 'スノーヘルパー',
   mat: 'フロアマット',
+  packed: '圧雪路',
+  snow: '雪原',
+  drift: '吹きだまり',
+  bare: '凍った路肩',
   air: '浮いている',
 };
+
+// the scoop is a tool, not a stock item: each dig takes `depth` metres off one snow cell
+export const SCOOP = { label: 'スコップ', depth: 0.12, time: 0.45 };
+const CELL = 0.5; // winter stage: size of one diggable snow cell
+const SNOW_X0 = 3;
+const SNOW_X1 = 8;
+const SNOW_POCKET = 5; // winter pocket half-length (m)
 
 export const ITEM_SPECS = {
   helper: { label: 'スノーヘルパー', half: [0.15, 0.02, 0.55], stock: 2 },
@@ -77,6 +97,8 @@ export class Sim {
     this.car = CARS[opts.car ?? DEFAULT_CAR];
     this.wheelDefs = wheelDefsFor(this.car);
     this.hookLocal = new Vec3(...this.car.hook);
+    this.stageKey = opts.stage ?? 'ditch';
+    this.stage = STAGES[this.stageKey];
     this.levelKey = opts.level ?? 'normal';
     this.level = { ...LEVELS[this.levelKey], ...(opts.override ?? {}) };
     this.world = new CANNON.World({ gravity: new Vec3(0, -9.82, 0) });
@@ -111,6 +133,10 @@ export class Sim {
     this.lastSpinMsg = -10;
     this.lastBrakeMsg = -10;
     this.nextItemId = 1;
+    this.snowGrid = null; // winter stage: snowGrid[ix][iz] = diggable cell
+    this.snowVersion = 0;
+    this.scoopReady = 0;
+    this.nextCellId = 1;
 
     this._buildStage();
     this._buildCar();
@@ -125,13 +151,64 @@ export class Sim {
     body.addShape(new Box(new Vec3(...half)));
     body.position.set(...pos);
     body.quaternion.setFromAxisAngle(new Vec3(0, 0, 1), rotZ);
-    body.userData = { kind, grip: kind === 'mud' ? this.level.mud : GRIP[kind], terrain: true, half };
+    body.userData = { kind, grip: kind === 'mud' ? this.level.mud : kind === 'drift' ? this.level.drift : GRIP[kind], terrain: true, half };
     this.world.addBody(body);
     return body;
   }
 
   _buildStage() {
-    const ZL = this.level.pocket; // half length of the ditch pocket
+    const winter = this.stageKey === 'winter';
+    const ZL = winter ? SNOW_POCKET : this.level.pocket; // half length of the pocket
+    this.pocketZ = ZL;
+    if (winter) this._buildWinterGround(ZL);
+    else this._buildDitchGround(ZL);
+    this._buildCommon();
+  }
+
+  _buildWinterGround(ZL) {
+    // packed-snow road, snow field on the other side, frozen bare ground under the pocket
+    this._addStatic('packed', [0, -0.5, 0], [3, 0.5, 40]);
+    this._addStatic('snow', [-8, -0.5, 0], [5, 0.5, 40]);
+    this._addStatic('bare', [(SNOW_X0 + SNOW_X1) / 2, -0.5, 0], [(SNOW_X1 - SNOW_X0) / 2, 0.5, ZL]);
+    // solid snow banks close the pocket (taller than the car's belly: they are not diggable)
+    const bl = 40 - ZL;
+    this._addStatic('snow', [5.5, 0.4, ZL + bl / 2], [2.5, 0.5, bl / 2]);
+    this._addStatic('snow', [5.5, 0.4, -ZL - bl / 2], [2.5, 0.5, bl / 2]);
+    this._addStatic('snow', [12, 0.4, 0], [4, 0.5, 40]);
+    // diggable cells: a powder drift with a plow ridge along the road edge
+    const nx = Math.round((SNOW_X1 - SNOW_X0) / CELL);
+    const nz = Math.round((2 * ZL) / CELL);
+    this.snowGrid = [];
+    for (let ix = 0; ix < nx; ix++) {
+      this.snowGrid[ix] = [];
+      for (let iz = 0; iz < nz; iz++) {
+        const x = SNOW_X0 + (ix + 0.5) * CELL;
+        const z = -ZL + (iz + 0.5) * CELL;
+        const h = this.level.snow + this.level.berm * Math.max(0, 1 - Math.abs(x - 3.5) / 1.0);
+        const cell = { id: this.nextCellId++, ix, iz, x, z, h, body: null };
+        this._makeCellBody(cell);
+        this.snowGrid[ix][iz] = cell;
+      }
+    }
+  }
+
+  _makeCellBody(cell) {
+    if (cell.body) this.world.removeBody(cell.body);
+    cell.body = null;
+    if (cell.h < 0.04) {
+      cell.h = 0;
+      return;
+    }
+    const half = [CELL / 2, cell.h / 2, CELL / 2];
+    const body = new Body({ mass: 0 });
+    body.addShape(new Box(new Vec3(...half)));
+    body.position.set(cell.x, cell.h / 2, cell.z);
+    body.userData = { kind: 'drift', grip: this.level.drift, cell: true };
+    this.world.addBody(body);
+    cell.body = body;
+  }
+
+  _buildDitchGround(ZL) {
     // road + grass
     this._addStatic('road', [0, -0.5, 0], [3, 0.5, 40]);
     this._addStatic('grass', [-8, -0.5, 0], [5, 0.5, 40]);
@@ -152,6 +229,13 @@ export class Sim {
     n = [-depth / L, run / L];
     this._addStatic('grass', [(x2 + x3) / 2 - n[0] * t, -depth / 2 - n[1] * t, 0], [L / 2, t, ZL], th);
     this._addStatic('grass', [(x3 + 16) / 2, -0.5, 0], [(16 - x3) / 2, 0.5, ZL]);
+    // blocks that close the pocket at both ends (concrete U-ditch walls)
+    const bl = 40 - ZL;
+    this._addStatic('grass', [9.5, -0.5, ZL + bl / 2], [6.5, 0.5, bl / 2]);
+    this._addStatic('grass', [9.5, -0.5, -ZL - bl / 2], [6.5, 0.5, bl / 2]);
+  }
+
+  _buildCommon() {
     // tree trunks: octagon-ish solid made of two boxes
     for (const [x, z] of TREES) {
       const trunk = new Body({ mass: 0 });
@@ -176,10 +260,6 @@ export class Sim {
     tb.userData = { kind: 'truck', grip: 0.5 };
     this.truckBody = tb;
     this.world.addBody(tb);
-    // blocks that close the pocket at both ends (concrete U-ditch walls)
-    const bl = 40 - ZL;
-    this._addStatic('grass', [9.5, -0.5, ZL + bl / 2], [6.5, 0.5, bl / 2]);
-    this._addStatic('grass', [9.5, -0.5, -ZL - bl / 2], [6.5, 0.5, bl / 2]);
   }
 
   // ---------------------------------------------------------------- car
@@ -187,8 +267,13 @@ export class Sim {
     const car = this.car;
     const chassis = new Body({ mass: car.mass });
     for (const sh of car.shapes) chassis.addShape(new Box(new Vec3(...sh.half)), new Vec3(...sh.at)); // lower body + cabin
-    chassis.position.set(3.75, car.spawnY, 0);
-    chassis.quaternion.setFromEuler(0, this.level.yaw, -Math.atan2(this.level.depth, (car.trackF + car.trackR) / 2) * 0.95);
+    if (this.stageKey === 'winter') {
+      chassis.position.set(5, this.level.snow + this.level.berm * 0.3 + 0.78, 0); // drop onto the snow from just above
+      chassis.quaternion.setFromEuler(0, this.level.wyaw, 0);
+    } else {
+      chassis.position.set(3.75, car.spawnY, 0);
+      chassis.quaternion.setFromEuler(0, this.level.yaw, -Math.atan2(this.level.depth, (car.trackF + car.trackR) / 2) * 0.95);
+    }
     chassis.collisionFilterGroup = 1;
     chassis.collisionFilterMask = ~2; // do not collide with thin placed items
     chassis.linearDamping = 0.05;
@@ -319,7 +404,7 @@ export class Sim {
       const hitBody = wi.raycastResult.body;
       const inContact = wi.isInContact && hitBody;
       const kind = inContact ? hitBody.userData?.kind ?? 'road' : 'air';
-      const soft = kind === 'mud' ? 1 : kind === 'grass' ? 0.3 : 0;
+      const soft = SOFT[kind] ?? 0;
       let grip = inContact ? hitBody.userData?.grip ?? 0.5 : 0;
       if (soft) {
         // dug-in tyres lose grip; mud grip also flutters as the tread clogs and bites (stick-slip)
@@ -402,7 +487,7 @@ export class Sim {
     this.wheelDefs.forEach((_, i) => {
       const st = this.wheelState[i];
       const wi = v.wheelInfos[i];
-      const soft = st.surface === 'mud' ? 1 : st.surface === 'grass' ? 0.3 : 0;
+      const soft = SOFT[st.surface] ?? 0;
       const rel = wi.worldTransform.position.vsub(ch.position);
       const vel = ch.getVelocityAtWorldPoint(wi.worldTransform.position, new Vec3()); // takes a WORLD point
       const hs = Math.hypot(vel.x, vel.z); // ground speed of the tyre
@@ -462,11 +547,11 @@ export class Sim {
       baseZ: wp.z,
       tilt,
       unstable: tilt > 12,
-      soft: kind === 'mud' && !padded,
+      soft: (kind === 'mud' || kind === 'drift') && !padded,
     };
     this.emit('jackSet');
     if (this.jack.unstable) this.say(`ジャッキ設置面が傾いている(${tilt.toFixed(0)}°) 持ち上げると倒れる`, 'warn');
-    else if (this.jack.soft) this.say('ぬかるみの上: 板やマットを下に敷かないと沈む', 'warn');
+    else if (this.jack.soft) this.say((kind === 'drift' ? '吹きだまりの上: 板やマットを下に敷かないと沈む' : 'ぬかるみの上: 板やマットを下に敷かないと沈む'), 'warn');
     else this.say('ジャッキを設置した (Z上げ / X下げ)', 'info');
   }
 
@@ -697,6 +782,67 @@ export class Sim {
     return true;
   }
 
+  // ---------------------------------------------------------------- scoop (winter stage)
+  cellAt(x, z) {
+    if (!this.snowGrid) return null;
+    const ix = Math.floor((x - SNOW_X0) / CELL);
+    const iz = Math.floor((z + this.pocketZ) / CELL);
+    return this.snowGrid[ix]?.[iz] ?? null;
+  }
+
+  /** Would a scoop at world (x,z) be accepted? (mouse hover + tap + keys) */
+  previewScoop(x, z) {
+    if (!this.snowGrid) return { ok: false, reason: 'ここには掘れる雪がない(冬道ステージで使う)' };
+    const cell = this.cellAt(x, z);
+    if (!cell) return { ok: false, reason: 'そこは掘れない(固い雪の壁 / 路面)' };
+    if (cell.h <= 0) return { ok: false, reason: 'もう地面まで掘ってある', cell };
+    const { dist } = this.nearestWheel(cell.x, cell.z);
+    if (dist > ITEM_REACH) return { ok: false, reason: '遠すぎて手が届かない', cell };
+    for (let i = 0; i < this.wheelDefs.length; i++) {
+      if (this.wheelState[i].air) continue;
+      const wp = this.vehicle.wheelInfos[i].worldTransform.position;
+      if (Math.hypot(wp.x - cell.x, wp.z - cell.z) < 0.42) {
+        return { ok: false, reason: `${this.wheelDefs[i].name}タイヤが乗っている所は掘れない(タイヤの前後を掘る)`, cell };
+      }
+    }
+    if (this.items.some((it) => Math.abs(it.body.position.x - cell.x) < CELL / 2 + 0.1 && Math.abs(it.body.position.z - cell.z) < CELL / 2 + 0.1)) {
+      return { ok: false, reason: '上に道具が載っていて掘れない(先に回収する)', cell };
+    }
+    return { ok: true, cell };
+  }
+
+  scoopAt(x, z) {
+    const pv = this.previewScoop(x, z);
+    if (!pv.ok) {
+      this.say(pv.reason, 'warn');
+      return false;
+    }
+    if (this.time < this.scoopReady) return false; // still swinging
+    this.scoopReady = this.time + SCOOP.time;
+    const cell = pv.cell;
+    cell.h = Math.max(0, cell.h - SCOOP.depth);
+    this._makeCellBody(cell);
+    this.snowVersion++;
+    this.emit('scoop', { h: cell.h });
+    this.say(cell.h > 0 ? `雪を掘った(この区画 あと${Math.round(cell.h * 100)}cm)` : '雪を掘りきった(地面が出た)', 'info');
+    return true;
+  }
+
+  /** key version: dig next to tyre `wheelIdx` in direction `dirKey` */
+  scoopDir(wheelIdx, dirKey) {
+    const wp = this.vehicle.wheelInfos[wheelIdx].worldTransform.position;
+    const f = this.forwardH();
+    const right = new Vec3(-f.z, 0, f.x);
+    const inside = this.wheelDefs[wheelIdx].x > 0 ? right.clone() : right.scale(-1);
+    const dd = PLACE_DIRS[dirKey];
+    if (dd.angle === null) return this.scoopAt(wp.x, wp.z);
+    const a = (dd.angle * Math.PI) / 180;
+    const dir = f.scale(Math.cos(a)).vadd(inside.scale(Math.sin(a)));
+    dir.normalize();
+    const off = this.car.tireR + 0.3;
+    return this.scoopAt(wp.x + dir.x * off, wp.z + dir.z * off);
+  }
+
   /** Why this placed item cannot be pulled out right now (null = it can). */
   _recoverBlock(it) {
     const [hx, , hz] = ITEM_SPECS[it.kind].half;
@@ -747,8 +893,8 @@ export class Sim {
     this.messages = this.messages.slice(-30);
     this.events = this.events.slice(-30);
     if (this.won) return;
-    // win: all four wheels on asphalt
-    const onRoad = this.wheelState.every((w) => w.surface === 'road');
+    // win: all four wheels back on the road
+    const onRoad = this.wheelState.every((w) => this.stage.goal.includes(w.surface));
     this.winTimer = onRoad ? this.winTimer + dt : 0;
     if (this.winTimer > 0.8 && !this.flipped) {
       this.won = true;
@@ -783,6 +929,8 @@ export class Sim {
       won: this.won,
       flipped: this.flipped,
       itemsUsed: this.items.length,
+      stage: this.stageKey,
+      scoopReady: this.time >= this.scoopReady,
     };
   }
 }

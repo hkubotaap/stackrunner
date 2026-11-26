@@ -6,16 +6,17 @@ import { buildCar } from './carModel.js';
 import { buildImpreza } from './carImpreza.js';
 import { buildHustler } from './carHustler.js';
 import { GameAudio } from './audio.js';
-import { Sim, LEVELS, CARS, TREES, WHEEL_DEFS, PLACE_DIRS, ITEM_SPECS, SURFACE_LABEL } from './sim.js';
+import { Sim, LEVELS, STAGES, CARS, TREES, WHEEL_DEFS, PLACE_DIRS, ITEM_SPECS, SURFACE_LABEL } from './sim.js';
 
 const $ = (id) => document.getElementById(id);
 let levelKey = 'hard';
 let carKey = 'nbox';
-const makeSim = () => new Sim({ level: levelKey, car: carKey });
+let stageKey = 'ditch';
+const makeSim = () => new Sim({ level: levelKey, car: carKey, stage: stageKey });
 let sim = makeSim();
 const audio = new GameAudio();
 let lastRatchet = 0;
-let armed = null; // 'helper' | 'mat' | 'jack' : click / tap on the ground to use it
+let armed = null; // 'helper' | 'mat' | 'scoop' | 'jack' : click / tap on the ground to use it
 
 // ------------------------------------------------------------------ renderer / scene
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -54,7 +55,7 @@ addEventListener('resize', () => {
 });
 
 // ------------------------------------------------------------------ terrain (built from the physics bodies)
-const TERRAIN_COLOR = { road: 0x3c4046, grass: 0x5d8c3d, mud: 0x6e4b2c };
+const TERRAIN_COLOR = { road: 0x3c4046, grass: 0x5d8c3d, mud: 0x6e4b2c, packed: 0xcfd6de, snow: 0xf1f5f9, bare: 0x8d8f8f, drift: 0xfbfdff };
 const terrainGroup = new THREE.Group();
 scene.add(terrainGroup);
 function buildTerrain() {
@@ -73,18 +74,52 @@ function buildTerrain() {
   }
 }
 buildTerrain();
+
+// winter stage: diggable snow cells (rebuilt whenever the scoop changes the grid)
+const snowGroup = new THREE.Group();
+scene.add(snowGroup);
+const snowMat = new THREE.MeshStandardMaterial({ color: 0xfbfdff, roughness: 0.95 });
+let snowShown = -1;
+function syncSnow() {
+  if (!sim.snowGrid) {
+    if (snowGroup.children.length) { snowGroup.clear(); snowShown = -1; }
+    return;
+  }
+  if (snowShown === sim.snowVersion && snowGroup.children.length) return;
+  snowShown = sim.snowVersion;
+  for (const c of [...snowGroup.children]) { snowGroup.remove(c); c.geometry.dispose(); }
+  for (const col of sim.snowGrid) for (const cell of col) {
+    if (cell.h <= 0) continue;
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, cell.h, 0.5), snowMat);
+    m.position.set(cell.x, cell.h / 2, cell.z);
+    m.receiveShadow = true;
+    snowGroup.add(m);
+  }
+}
+function applyStageLook() {
+  const winter = sim.stageKey === 'winter';
+  const sky = winter ? 0xc8d6e3 : 0x9ec5e8;
+  scene.background.setHex(sky);
+  scene.fog.color.setHex(sky);
+  document.documentElement.style.background = '#' + sky.toString(16).padStart(6, '0');
+  roadMarks.visible = !winter;
+  leaf.color.setHex(winter ? 0x8aa595 : 0x2f6b34);
+  mudPoints.material.color.setHex(winter ? 0xf4f8ff : 0x5b3d25);
+}
 // road markings
+const roadMarks = new THREE.Group();
+scene.add(roadMarks);
+const leaf = new THREE.MeshStandardMaterial({ color: 0x2f6b34 });
 {
   const white = new THREE.MeshBasicMaterial({ color: 0xe8e8e0 });
   const edge = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 80), white);
-  edge.rotation.x = -Math.PI / 2; edge.position.set(2.7, 0.012, 0); scene.add(edge);
-  const edge2 = edge.clone(); edge2.position.x = -2.7; scene.add(edge2);
+  edge.rotation.x = -Math.PI / 2; edge.position.set(2.7, 0.012, 0); roadMarks.add(edge);
+  const edge2 = edge.clone(); edge2.position.x = -2.7; roadMarks.add(edge2);
   for (let z = -38; z < 38; z += 6) {
     const d = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 2.6), new THREE.MeshBasicMaterial({ color: 0xe8c040 }));
-    d.rotation.x = -Math.PI / 2; d.position.set(0, 0.012, z); scene.add(d);
+    d.rotation.x = -Math.PI / 2; d.position.set(0, 0.012, z); roadMarks.add(d);
   }
   const trunk = new THREE.MeshStandardMaterial({ color: 0x5a3e28 });
-  const leaf = new THREE.MeshStandardMaterial({ color: 0x2f6b34 });
   for (const [x, z] of TREES) {
     const t = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, 1.6, 8), trunk);
     t.position.set(x, 0.8, z); t.castShadow = true; scene.add(t);
@@ -140,7 +175,7 @@ function updateMud(dt) {
   h.wheels.forEach((w, i) => {
     if (w.surface === 'mud') dirt[i] = Math.min(1, dirt[i] + dt * (w.spinning ? 0.2 : 0.03));
     wheelMeshes[i].userData.tireMat.color.lerpColors(TIRE_CLEAN, TIRE_MUD, dirt[i]);
-    if (!(w.spinning && w.surface === 'mud' && h.thr !== 0)) return;
+    if (!(w.spinning && (w.surface === 'mud' || w.surface === 'drift') && h.thr !== 0)) return;
     const wp = sim.vehicle.wheelInfos[i].worldTransform.position;
     const n = Math.floor(70 * dt + Math.random());
     for (let k = 0; k < n; k++) {
@@ -255,6 +290,15 @@ const dirBtns = DIR_ORDER.map((k, i) => {
   return b;
 });
 
+const stageBtns = Object.entries(STAGES).map(([k, st]) => {
+  const b = document.createElement('button');
+  b.className = 'tb';
+  b.textContent = st.label;
+  b.onclick = () => { stageKey = k; reset(); };
+  $('stages').appendChild(b);
+  return [k, b];
+});
+
 const carBtns = Object.entries(CARS).map(([k, c]) => {
   const b = document.createElement('button');
   b.className = 'tb';
@@ -276,12 +320,13 @@ const levelBtns = Object.entries(LEVELS).map(([k, lv]) => {
 
 function arm(tool) {
   armed = armed === tool ? null : tool;
-  if (armed && armed !== 'jack' && sim.stock[armed] <= 0) { armed = null; sim.say('もう無い', 'warn'); }
+  if (armed && armed !== 'jack' && armed !== 'scoop' && sim.stock[armed] <= 0) { armed = null; sim.say('もう無い', 'warn'); }
 }
 
 const act = {
   helper: () => sim.placeItem('helper', selWheel, DIR_ORDER[dirIdx]),
   mat: () => sim.placeItem('mat', selWheel, DIR_ORDER[dirIdx]),
+  scoop: () => sim.scoopDir(selWheel, DIR_ORDER[dirIdx]),
   recover: () => sim.recoverLastItem(),
   jack: () => sim.toggleJack(selWheel),
   rope: () => sim.toggleRope(),
@@ -290,6 +335,7 @@ const act = {
 };
 $('b-helper').onclick = () => arm('helper');
 $('b-mat').onclick = () => arm('mat');
+$('b-scoop').onclick = () => arm('scoop');
 $('b-recover').onclick = act.recover;
 $('b-jack').onclick = () => (sim.jack ? act.jack() : arm('jack'));
 $('b-rope').onclick = act.rope;
@@ -316,6 +362,7 @@ addEventListener('keydown', (e) => {
     case 'Space': sim.toggleSideBrake(); break;
     case 'KeyQ': act.helper(); break;
     case 'KeyE': act.mat(); break;
+    case 'KeyC': act.scoop(); break;
     case 'Backspace': act.recover(); break;
     case 'KeyF': dirIdx = (dirIdx + 1) % DIR_ORDER.length; break;
     case 'KeyJ': act.jack(); break;
@@ -359,15 +406,19 @@ function updateHud() {
     bar.style.background = w.grip < 0.3 ? 'var(--bad)' : w.grip < 0.8 ? 'var(--warn)' : 'var(--good)';
   });
   $('misc').innerHTML = `経過 ${h.time.toFixed(0)}s ・ ミス ${h.misses}<br>` +
-    `スノーヘルパー残 ${h.stock.helper} / フロアマット残 ${h.stock.mat}`;
+    `スノーヘルパー残 ${h.stock.helper} / フロアマット残 ${h.stock.mat} / スコップ ${h.stage === 'winter' ? '○' : '(雪がない)'}`;
   $('b-helper').disabled = h.stock.helper <= 0;
-  if (armed && armed !== 'jack' && h.stock[armed] <= 0) armed = null;
+  $('b-scoop').disabled = h.stage !== 'winter';
+  $('b-scoop').classList.toggle('on', armed === 'scoop');
+  if (armed === 'scoop' && h.stage !== 'winter') armed = null;
+  if (armed && armed !== 'jack' && armed !== 'scoop' && h.stock[armed] <= 0) armed = null;
   $('b-mat').disabled = h.stock.mat <= 0;
   $('b-helper').classList.toggle('on', armed === 'helper');
   $('b-mat').classList.toggle('on', armed === 'mat');
   const hint = $('armhint');
   hint.style.display = armed ? 'block' : 'none';
   hint.textContent = armed === 'jack' ? 'ジャッキを置くタイヤをクリック/タップ(ボタンをもう一度押すと解除)'
+    : armed === 'scoop' ? '雪を掘る所をクリック/タップ(1回で約12cm。タイヤの下は掘れない / ボタンをもう一度押すと解除)'
     : armed ? (armed === 'helper' ? 'スノーヘルパー' : 'フロアマット') + 'を置く場所をクリック/タップ(ボタンをもう一度押すと解除)' : '';
   renderer.domElement.classList.toggle('armed', !!armed);
   dirBtns.forEach((b, i) => b.classList.toggle('on', i === dirIdx));
@@ -377,6 +428,7 @@ function updateHud() {
   $('b-side').classList.toggle('on', h.sideBrake);
   $('brakeinfo').textContent = h.sideBrake ? 'サイド: 後輪ロック中' : h.autoHold ? 'オートホールド作動' : '停車中は自動で保持';
   levelBtns.forEach(([k, b]) => b.classList.toggle('on', k === levelKey));
+  stageBtns.forEach(([k, b]) => b.classList.toggle('on', k === stageKey));
   carBtns.forEach(([k, b]) => b.classList.toggle('on', k === carKey));
   $('b-jack').classList.toggle('on', !!h.jack || armed === 'jack');
   $('b-rope').classList.toggle('on', !!h.rope);
@@ -405,7 +457,7 @@ const pointer = { x: 0, y: 0, inside: false, down: null, active: new Set() };
 function pickGround(cx, cy) {
   ndc.set((cx / innerWidth) * 2 - 1, -(cy / innerHeight) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
-  const hit = raycaster.intersectObjects([...terrainGroup.children, ...itemMeshes.values()], false)[0];
+  const hit = raycaster.intersectObjects([...terrainGroup.children, ...snowGroup.children, ...itemMeshes.values()], false)[0];
   return hit ? hit.point : null;
 }
 const ghostMat = new THREE.MeshBasicMaterial({ color: 0x4cd08a, transparent: true, opacity: 0.55, depthWrite: false });
@@ -427,7 +479,18 @@ function updateGhost() {
     const wp = sim.vehicle.wheelInfos[nw.wheel].worldTransform.position;
     hoverRing.visible = true;
     hoverRing.position.set(wp.x, wp.y - 0.2, wp.z);
+    hoverRing.scale.setScalar(1);
     hoverRing.material.color.setHex(nw.dist < 1.4 ? 0x4cd08a : 0xff5d5d);
+    return;
+  }
+  if (armed === 'scoop') {
+    const sp = sim.previewScoop(pt.x, pt.z);
+    const c = sp.cell;
+    if (!c) return;
+    hoverRing.visible = true;
+    hoverRing.position.set(c.x, c.h + 0.03, c.z);
+    hoverRing.scale.setScalar(0.6);
+    hoverRing.material.color.setHex(sp.ok ? 0x4cd08a : 0xff5d5d);
     return;
   }
   const spec = ITEM_SPECS[armed];
@@ -453,6 +516,8 @@ function handleTap(cx, cy) {
   const nw = sim.nearestWheel(pt.x, pt.z);
   if (armed === 'jack') {
     if (nw.dist < 1.4) { selWheel = nw.wheel; sim.toggleJack(nw.wheel); armed = null; } else sim.say('タイヤの近くをタップしてください', 'warn');
+  } else if (armed === 'scoop') {
+    sim.scoopAt(pt.x, pt.z);
   } else if (armed) {
     sim.placeItemAt(armed, pt.x, pt.z);
   } else if (nw.dist < 0.9) {
@@ -497,6 +562,8 @@ function reset() {
   sim = makeSim();
   loadCarModel();
   buildTerrain();
+  snowShown = -1;
+  applyStageLook();
   lastRatchet = 0;
   armed = null;
   dirt.fill(0);
@@ -507,8 +574,9 @@ function reset() {
   logEl.innerHTML = '';
   held.clear();
   selWheel = 0;
-  controls.target.set(3.75, 0.5, 0);
+  controls.target.set(...(sim.stageKey === 'winter' ? [5, 0.5, 0] : [3.75, 0.5, 0]));
   camera.position.set(-2.5, 4, -6);
+  sayIntro();
 }
 
 function syncCar() {
@@ -542,6 +610,7 @@ function syncCar() {
     col.position.y = h / 2;
   }
   syncItems();
+  syncSnow();
 }
 
 let last = performance.now();
@@ -588,9 +657,13 @@ function frame(now) {
 }
 
 $('loading').remove();
-sim.say(`${sim.car.label}の左輪が側溝のぬかるみに落ちた。道具を使って脱出しよう`, 'info');
-sim.say('音が出ない時は、何かキーを押す(M でミュート)', 'info');
-sim.say('まずは 1-4 でタイヤを選び、Q/E で道具を置く', 'info');
+function sayIntro() {
+  sim.say(`${sim.car.label}${sim.stage.intro}`, 'info');
+  sim.say('音が出ない時は、何かキーを押す(M でミュート)', 'info');
+  sim.say(sim.stageKey === 'winter' ? 'スコップボタン(C)で雪山を掘ってから、ゆっくり発進' : 'まずは 1-4 でタイヤを選び、Q/E で道具を置く', 'info');
+}
+applyStageLook();
+sayIntro();
 requestAnimationFrame(frame);
 
 // debug hook for automated checks
