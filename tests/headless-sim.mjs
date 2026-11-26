@@ -241,6 +241,203 @@ cases.push(
   ['impreza: stopped by the kei truck', () => impDrive(-1.2, -20, 12) < 0.8, true],
 );
 
+// ---- per-car stability / traction control: the Impreza (2003 2.0 NA) has none, so nothing cuts power
+const noTc = new Sim({ car: 'impreza' });
+const noTcMsg = noTc.vsa;
+noTc.toggleVsa();
+const spin = (car, vsa) => {
+  const s = new Sim({ car, level: 'hard' }); s.vsa = vsa; s.setInput({ throttle: 1, steer: 0, brake: false });
+  for (let i = 0; i < 3 * 60; i++) s.update(1 / 60);
+  return { cut: s.vsaCut, dig: Math.max(...s.dig) };
+};
+cases.push(
+  ['impreza: no traction control (starts off, toggle does nothing, hud shows none)', () => noTcMsg === false && noTc.vsa === false && noTc.getHud().vsa === false && noTc.getHud().vsaName === null, true],
+  ['impreza: power is never cut even if vsa is forced on', () => spin('impreza', true).cut, false],
+  ['nbox: VSA cuts power on wheelspin', () => spin('nbox', true).cut, true],
+  ['hustler: ESP cuts power on wheelspin', () => spin('hustler', true).cut, true],
+);
+
+// ---- Hustler (HYBRID X 4WD): same map and rules, lighter and weaker car
+const hus = new Sim({ car: 'hustler', level: 'hard' });
+const hw = hus.vehicle.wheelInfos.map((w) => w.worldTransform.position);
+function playHus(opts, level = 'hard') {
+  const s = new Sim({ car: 'hustler', level });
+  s.vsa = opts.vsa;
+  (opts.setup ?? (() => {}))(s);
+  let tm = 0;
+  while (tm < (opts.secs ?? 30) && !s.won && !s.flipped) {
+    const f = tm % (opts.fwd + opts.back) < opts.fwd;
+    s.setInput({ throttle: f ? 1 : -1, steer: f ? opts.sf : opts.sb, brake: false });
+    s.update(1 / 30); tm += 1 / 30;
+  }
+  return s.won;
+}
+const husDrive = (x, z, secs) => {
+  const s = new Sim({ car: 'hustler' });
+  s.chassis.position.set(x, 0.9, z); s.chassis.quaternion.set(0, 0, 0, 1);
+  s.chassis.velocity.set(0, 0, 0); s.chassis.angularVelocity.set(0, 0, 0); s.vsa = false;
+  for (let i = 0; i < 120; i++) s.update(1 / 60);
+  s.setInput({ throttle: 1, steer: 0, brake: false });
+  for (let i = 0; i < secs * 60; i++) s.update(1 / 60);
+  return s.chassis.position.z;
+};
+const husJack = new Sim({ car: 'hustler', level: 'hard' });
+const hjw = husJack.vehicle.wheelInfos[0].worldTransform.position;
+husJack.placeItemAt('mat', hjw.x - 0.5, hjw.z);
+husJack.toggleJack(0);
+for (let i = 0; i < 7 * 60; i++) { husJack.jackMove(1, 1 / 60); husJack.update(1 / 60); }
+const hjys = [];
+for (let i = 0; i < 4 * 60; i++) { husJack.update(1 / 60); hjys.push(husJack.cornerWorld(0).y); }
+const husRopeHelpers = (s) => { s.toggleRope(); s.setPulling(true); s.placeItem('helper', 0, 'diagFront'); s.placeItem('helper', 2, 'diagFront'); };
+cases.push(
+  ['hustler: 850 kg, wheelbase 2460 mm', () => hus.chassis.mass === 850 && Math.abs(hw[0].z - hw[2].z - 2.46) < 0.002, true],
+  ['hustler: traction control is labelled ESP (others VSA) and toggles', () => { const e = new Sim({ car: 'hustler' }); const m = new Sim({ car: 'nbox' }); const b = e.vsa; e.toggleVsa(); return e.car.vsaName === 'ESP' && m.car.vsaName === 'VSA' && e.vsa === !b; }, true],
+  ['hustler: starts with the left tyres in the mud, right on asphalt', () => hus.wheelState.map((w) => w.surface).join() === 'mud,road,mud,road', true],
+  ['hustler hard: no item rocking never escapes', () => rockImp.some((r) => playHus(r)), false],
+  ['hustler extreme: no item rocking never escapes', () => rockImp.some((r) => playHus(r, 'extreme')), false],
+  ['hustler hard: rope + helpers + rocking escapes', () => playHus({ vsa: false, fwd: 0.5, back: 0.5, sf: -1, sb: -1, setup: husRopeHelpers }), true],
+  ['hustler extreme: rope + helpers + rocking escapes', () => playHus({ vsa: false, fwd: 0.5, back: 0.5, sf: -1, sb: -1, secs: 60, setup: husRopeHelpers }, 'extreme'), true],
+  ['hustler: floor mat under a tyre is still refused', () => hus.previewAt('mat', hw[0].x, hw[0].z).ok, false],
+  ['hustler: helper under a grounded tyre is still refused', () => hus.previewAt('helper', hw[1].x, hw[1].z).ok, false],
+  ['hustler: jack floats the tyre without bobbing', () => husJack.wheelState[0].air && Math.max(...hjys) - Math.min(...hjys) < 0.015, true],
+  ['hustler: stopped by the tree trunk', () => husDrive(-9, -16, 10) < -7.5, true],
+  ['hustler: stopped by the kei truck', () => husDrive(-1.2, -20, 12) < 1.0, true],
+);
+
+// ---- winter stage (冬道): snow ridge beside the road, dig it out with the scoop
+const winterSim = (level, car) => new Sim({ stage: 'winter', level, car });
+const rowsFor = (a, b) => { const r = []; for (let z = a; z <= b + 1e-6; z += 0.5) r.push(z); return r; };
+/** dig every cell (x in xs, z in rows) down to `target` metres; skips cells the scoop refuses (under a tyre) */
+function digTo(s, rows, target = 0.22, xs = [4.25, 3.75, 3.25]) {
+  let strokes = 0;
+  for (const z of rows) for (const x of xs) {
+    for (let k = 0; k < 60; k++) {
+      const c = s.cellAt(x, z);
+      if (!c || c.h <= target || !s.previewScoop(x, z).ok) break;
+      while (s.time < s.scoopReady) s.update(0.05);
+      if (s.scoopAt(x, z)) strokes++; else break;
+    }
+  }
+  return strokes;
+}
+function winterPlay({ level = 'normal', car, rows = null, rope = false, fw = 0.5, bw = 1, secs = 40 }) {
+  const s = winterSim(level, car);
+  s.vsa = false;
+  if (rows) digTo(s, rows);
+  if (rope) { s.toggleRope(); s.setPulling(true); }
+  let t = 0;
+  while (t < secs && !s.won && !s.flipped) {
+    const f = t % (fw + bw) < fw;
+    s.setInput({ throttle: f ? 1 : -1, steer: f ? -1 : 1, brake: false });
+    s.update(1 / 60); t += 1 / 60;
+  }
+  return s.won;
+}
+const w0 = winterSim('hard');
+const ridge = w0.cellAt(3.75, 0.25);
+const ridgeRho = ridge.rho;
+const ridgeH0 = ridge.h;
+const okScoop = w0.scoopAt(3.75, 0.25);
+const ridgeH1 = w0.cellAt(3.75, 0.25).h;
+const swinging = w0.scoopAt(3.75, 0.25); // still swinging: nothing happens
+w0.update(2);
+const powder = w0.cellAt(4.75, -3.25); // loose drift away from the tyres: a full stroke
+const powderH0 = powder.h;
+w0.scoopAt(4.75, -3.25);
+const powderStroke = powderH0 - w0.cellAt(4.75, -3.25).h;
+const farScoop = w0.previewScoop(7.6, 4.6);
+const wheelPos = w0.vehicle.wheelInfos[1].worldTransform.position; // front-right tyre
+const tyreScoop = w0.previewScoop(wheelPos.x, wheelPos.z);
+for (let i = 0; i < 40 && w0.cellAt(3.75, 0.25).h > 0; i++) { while (w0.time < w0.scoopReady) w0.update(0.05); w0.scoopAt(3.75, 0.25); }
+const ditchSim = new Sim({ level: 'hard' });
+cases.push(
+  ['winter: car starts with all four tyres on the powder drift', () => w0.wheelState.map((w) => w.surface).join() === 'drift,drift,drift,drift', true],
+  ['winter: loose powder gives a full 12 cm stroke', () => Math.abs(powderStroke - 0.12) < 1e-6, true],
+  ['winter: the denser plowed ridge gives a shorter stroke (120 / (rho/150) mm)', () => okScoop && Math.abs(ridgeH0 - ridgeH1 - 0.12 * (150 / ridgeRho)) < 1e-6 && ridgeH0 - ridgeH1 < 0.12, true],
+  ['winter: a second swing right away does nothing', () => swinging === false, true],
+  ['winter: the ridge can be dug down to bare ground (body removed)', () => w0.cellAt(3.75, 0.25).h === 0 && w0.cellAt(3.75, 0.25).body === null, true],
+  ['winter: too far to reach is refused', () => farScoop.ok === false && /遠すぎ/.test(farScoop.reason), true],
+  ['winter: cannot dig under a tyre that is standing on it', () => tyreScoop.ok === false && /タイヤ/.test(tyreScoop.reason), true],
+  ['winter: the scoop does nothing on the ditch stage', () => ditchSim.previewScoop(3.75, 0.25).ok === false, true],
+  ['winter: no digging, rocking never escapes (all levels)', () => ['normal', 'hard', 'extreme'].some((level) => winterPlay({ level })), false],
+  ['winter: no digging, rope + rocking never escapes', () => ['normal', 'hard'].some((level) => winterPlay({ level, rope: true })), false],
+  ['winter normal: dig the ridge + rope + rocking escapes', () => winterPlay({ level: 'normal', rows: rowsFor(-1.25, 1.75), rope: true }), true],
+  ['winter hard: dig the ridge (wider cut) + rope + rocking escapes', () => winterPlay({ level: 'hard', rows: rowsFor(-1.75, 2.25), rope: true, secs: 60 }), true],
+  ['winter extreme: dig the ridge + rope + rocking escapes (wider cut, longer)', () => winterPlay({ level: 'extreme', rows: rowsFor(-1.75, 2.25), rope: true, secs: 60 }), true],
+);
+
+// ---- snow physics: compaction, ice, sinking, hardness, pushing
+const snowMass = (s) => s.snowGrid.flat().reduce((a, c) => a + c.m, 0);
+const spinSim = winterSim('normal');
+spinSim.vsa = false;
+const spinLog = [];
+spinSim.setInput({ throttle: 1, steer: 0, brake: false });
+const spinY0 = spinSim.chassis.position.y;
+const cellUnderFL0 = spinSim.wheelState[0].cell;
+const flRho0 = cellUnderFL0.rho;
+const flH0 = cellUnderFL0.h;
+for (let sec = 1; sec <= 40; sec++) {
+  for (let i = 0; i < 60; i++) spinSim.update(1 / 60);
+  const w = spinSim.wheelState[0]; // the cell under the front-left tyre at that moment (the car shifts and sinks)
+  spinLog.push({ sec, kind: w.surface, mu: w.grip, rho: w.cell.rho, glaze: w.cell.glaze, h: w.cell.h });
+}
+const muAt = (sec) => spinLog[sec - 1].mu;
+const bestMu = Math.max(...spinLog.map((l) => l.mu));
+const mass0 = snowMass(winterSim('normal'));
+// pushing: unit-level rules of the bulldozer (the physics contact feeds it the force)
+const dz = winterSim('hard');
+const src = dz.cellAt(3.75, 0.25);
+const dst = dz.cellAt(3.25, 0.25);
+const edge = dz.cellAt(7.75, 0.25);
+const m0 = src.m + dst.m;
+const dstRho0 = dst.rho;
+const dstH0 = dst.h;
+const touchedA = new Set();
+dz._bulldoze(src, -1, 0, 100, 1 / 60, touchedA); // far below the crushing strength of a 0.4 m ridge cell... see pushYield
+const movedWeak = dst.m - (m0 - src.m);
+const touchedB = new Set();
+for (let i = 0; i < 120; i++) dz._bulldoze(src, -1, 0, 1e6, 1 / 60, touchedB); // a huge push
+for (const c of touchedB) dz._snowChanged(c);
+const wallBefore = dz.cellAt(3.25, 0.25);
+const wallRho = wallBefore.rho;
+const edgeTouched = new Set();
+dz._bulldoze(edge, 1, 0, 1e6, 1 / 60, edgeTouched); // pushing toward the solid bank: nothing to push into
+const edgeMass = edge.m;
+// belly-out: a car sitting on the ridge loads that cell
+const belly = winterSim('normal');
+const bellyRho0 = belly.snowGrid.flat().map((c) => c.rho);
+for (let i = 0; i < 6 * 60; i++) belly.update(1 / 60);
+const bellyRho1 = belly.snowGrid.flat().map((c) => c.rho);
+// physical push: a loose pile in front of the bumper of a car facing the ridge is shoved into the next column
+const phys = winterSim('normal', 'hustler');
+phys.vsa = false;
+for (let z = -1.75; z <= 1.75; z += 0.5) { const c = phys.cellAt(4.25, z); c.rho = 100; c.h = 0.34; c.m = 34; phys._snowChanged(c); }
+phys.chassis.position.set(6.2, 0.7, 0); phys.chassis.quaternion.setFromEuler(0, -Math.PI / 2, 0);
+phys.chassis.velocity.set(0, 0, 0); phys.chassis.angularVelocity.set(0, 0, 0);
+for (let i = 0; i < 120; i++) phys.update(1 / 60);
+const colM = (s, x) => [-0.75, -0.25, 0.25, 0.75].reduce((acc, z) => acc + s.cellAt(x, z).m, 0);
+const colBefore = [colM(phys, 4.25), colM(phys, 3.75)];
+const physMass0 = snowMass(phys);
+phys.setInput({ throttle: 1, steer: 0, brake: false });
+for (let i = 0; i < 15 * 60; i++) phys.update(1 / 60);
+cases.push(
+  ['snow: driving into a loose pile shoves it into the next column (mass moves, total kept)', () => colM(phys, 4.25) < colBefore[0] - 1 && colM(phys, 3.75) > colBefore[1] + 1 && Math.abs(snowMass(phys) - physMass0) < 1e-6, true],
+);
+cases.push(
+  ['snow: wheelspin on powder packs it (denser, lower height, same mass)', () => spinLog[9].rho > flRho0 * 2 && spinLog[9].h < flH0 * 0.6, true],
+  ['snow: packed snow grips better than the loose powder it came from', () => bestMu > muAt(1) * 1.8 && bestMu > 0.38, true],
+  ['snow: sustained wheelspin turns it to polished ice (low grip, dense, glazed)', () => spinLog[39].rho > 750 && spinLog[39].glaze === 1 && spinLog[39].kind === 'ice' && spinLog[39].mu < 0.15, true],
+  ['snow: the car sinks as the snow under its tyres is packed', () => spinSim.chassis.position.y < spinY0 - 0.08, true],
+  ['snow: packing never creates or destroys snow (only digging removes mass)', () => Math.abs(snowMass(spinSim) - mass0) < 1e-6, true],
+  ['snow: pushing below the crushing strength moves nothing', () => touchedA.size === 0 && Math.abs(movedWeak) < 1e-12, true],
+  ['snow: a hard push moves snow into the next cell and keeps the mass', () => touchedB.size === 2 && src.m < 1e-6 + (m0 - dst.m) && Math.abs(src.m + dst.m - m0) < 1e-6 && dst.m > 0, true],
+  ['snow: pushed snow is packed denser and piles up (a wall)', () => wallRho > dstRho0 * 1.05 && wallBefore.h > dstH0, true],
+  ['snow: the pile cannot be pushed into a solid bank', () => edgeTouched.size === 0 && edge.m === edgeMass, true],
+  ['snow: the underbody resting on the ridge packs it (belly-out)', () => bellyRho1.some((r, i) => r > bellyRho0[i] + 1), true],
+  ['snow: ice only chips (stroke <= 1/5 of a powder stroke, never refused)', () => { const s = winterSim('normal'); const c = s.cellAt(4.75, -3.25); c.rho = 900; c.m = c.h * 900; s._snowChanged(c); const h0 = c.h; s.scoopAt(4.75, -3.25); return h0 - c.h > 0 && h0 - c.h <= 0.12 / 5 + 1e-9; }, true],
+  ['snow: the scoop is slower on dense snow', () => { const a = winterSim('normal'); a.scoopAt(4.75, -3.25); const tl = a.scoopReady - a.time; const b = winterSim('normal'); const c = b.cellAt(4.75, -2.75); c.rho = 450; c.m = c.h * 450; b._snowChanged(c); b.scoopAt(4.75, -2.75); return b.scoopReady - b.time > tl * 2; }, true],
+);
+
 let fail = 0;
 for (const [name, fn, expect] of cases) {
   const got = fn();
