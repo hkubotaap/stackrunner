@@ -14,11 +14,12 @@ const { Vec3, Quaternion, Body, Box } = CANNON;
 export const DT = 1 / 120;
 
 // How the car fell in: ditch depth (m), pocket half-length (m, limits the run-up), start yaw toward the ditch (rad), mud friction.
-// Winter stage extras: snow = drift depth (m), berm = extra height of the plow ridge beside the road (m), drift = powder grip, wyaw = start yaw (rad).
+// Winter stage extras: snow = drift depth (m), berm = extra height of the plow ridge beside the road (m),
+// rho = initial density of the drift (kg/m3), wyaw = start yaw (rad).
 export const LEVELS = {
-  normal: { label: '標準', depth: 0.32, pocket: 6, yaw: 0, mud: 0.07, snow: 0.18, berm: 0.26, drift: 0.17, wyaw: 0 },
-  hard: { label: '高難度', depth: 0.38, pocket: 6, yaw: 0, mud: 0.06, snow: 0.2, berm: 0.3, drift: 0.15, wyaw: 0 },
-  extreme: { label: '鬼', depth: 0.44, pocket: 6, yaw: 0.2, mud: 0.06, snow: 0.2, berm: 0.32, drift: 0.14, wyaw: 0.1 },
+  normal: { label: '標準', depth: 0.32, pocket: 6, yaw: 0, mud: 0.07, snow: 0.18, berm: 0.26, rho: 170, wyaw: 0 },
+  hard: { label: '高難度', depth: 0.38, pocket: 6, yaw: 0, mud: 0.06, snow: 0.2, berm: 0.3, rho: 140, wyaw: 0 },
+  extreme: { label: '鬼', depth: 0.44, pocket: 6, yaw: 0.2, mud: 0.06, snow: 0.2, berm: 0.32, rho: 120, wyaw: 0.1 },
 };
 
 export const STAGES = {
@@ -29,9 +30,9 @@ export const STAGES = {
 export const WHEEL_DEFS = wheelDefsFor(CARS[DEFAULT_CAR]); // names / sides; per-car positions: sim.wheelDefs
 
 // friction coefficient per surface kind
-export const GRIP = { road: 1.0, grass: 0.55, mud: 0.07, helper: 1.25, mat: 0.7, packed: 0.42, snow: 0.28, drift: 0.13, bare: 0.38 };
+export const GRIP = { road: 1.0, grass: 0.55, mud: 0.07, helper: 1.25, mat: 0.7, packed: 0.42, snow: 0.28, bare: 0.38 };
 // how soft a surface is: soft tyres dig themselves in when they spin
-const SOFT = { mud: 1, drift: 1, grass: 0.3, snow: 0.3 };
+const SOFT = { mud: 1, grass: 0.3, snow: 0.3 }; // snow cells compute their own softness from density
 export const SURFACE_LABEL = {
   road: 'アスファルト',
   grass: '草地',
@@ -40,7 +41,9 @@ export const SURFACE_LABEL = {
   mat: 'フロアマット',
   packed: '圧雪路',
   snow: '雪原',
-  drift: '吹きだまり',
+  drift: '吹きだまり(新雪)',
+  crust: '踏み固めた雪',
+  ice: '氷',
   bare: '凍った路肩',
   air: '浮いている',
 };
@@ -48,6 +51,39 @@ export const SURFACE_LABEL = {
 // the scoop is a tool, not a stock item: each dig takes `depth` metres off one snow cell
 export const SCOOP = { label: 'スコップ', depth: 0.12, time: 0.45 };
 const CELL = 0.5; // winter stage: size of one diggable snow cell
+
+// ---- snow model (game-scale simplification of real snow behaviour; the numbers are tuned, not measured)
+// Each cell keeps its snow mass per area m = rho * h (kg/m2). Compaction raises the density rho and lowers the
+// height h at constant mass (so the ground sinks under a tyre); digging and pushing change the mass.
+const RHO_ICE = 917; // kg/m3, solid ice
+const PATCH = 0.023; // m2, tyre contact patch (width x ~14 cm)
+const BELLY_AREA = 0.1; // m2, assumed contact area of the underbody resting on a snow cell
+const COMPACT_TAU = 4; // s, relaxation time toward the density a given pressure can reach
+const SHEAR_RATE = 60; // kg/m3 per s of wheelspin (shear + frictional heating densify snow much faster than load alone)
+const GLAZE_RATE = 0.2; // 1/s, polished ice film on dense snow under a spinning tyre
+const PUSH_COMPACT = 1.12; // density factor each time snow is bulldozed (pushed snow is packed)
+const RIDGE_RHO = 260; // kg/m3, plowed snow in the ridge (denser than the wind-blown drift)
+const PUSH_TAU = 0.25; // s, smoothing of the push force on a cell
+const MAX_CONTACT_F = 20000; // N, cap on one contact force sample
+const H_MAX = 1.2; // m, a pushed pile cannot grow higher than this
+const MIN_BODY_H = 0.03; // m, thinner layers have no collision body (the tyre rides on the ground below)
+/** density (kg/m3) that a pressure p (Pa) alone can pack snow to: ~230 under a parked tyre, ~290 at 1.6x the load (packing it
+ *  further takes wheelspin / repeated shear, see SHEAR_RATE) */
+const rhoEq = (p) => 100 + (RHO_ICE - 100) * (1 - Math.exp(-p / 600000));
+const lerpTable = (t, x) => {
+  for (let i = 1; i < t.length; i++) if (x <= t[i][0]) return t[i - 1][1] + ((x - t[i - 1][0]) / (t[i][0] - t[i - 1][0])) * (t[i][1] - t[i - 1][1]);
+  return t[t.length - 1][1];
+};
+// friction coefficient vs density: loose powder < packed snow (best) > ice
+const SNOW_MU = [[80, 0.12], [150, 0.14], [300, 0.3], [450, 0.42], [650, 0.34], [917, 0.16]];
+const snowGrip = (c) => lerpTable(SNOW_MU, c.rho) * (1 - 0.5 * c.glaze * Math.min(1, Math.max(0, (c.rho - 500) / 300)));
+/** how much a tyre digs in: powder 1, 0 once the snow is dense enough to carry the tyre */
+const snowSoft = (rho) => Math.min(1, Math.max(0, (420 - rho) / 300));
+const snowKind = (c) => (c.rho < 260 ? 'drift' : c.rho < 720 && c.glaze < 0.5 ? 'crust' : 'ice');
+/** how far one scoop stroke goes: hard snow resists (roughly with density), ice only chips */
+const scoopDepth = (rho) => Math.max(0.01, SCOOP.depth * (150 / Math.max(rho, 150)) ** 1.0);
+/** crushing force (N) a bulldozing car needs to push a cell: grows with density^2 and with height */
+const pushYield = (c) => 900 * (c.rho / 150) ** 2 * (c.h / 0.3);
 const SNOW_X0 = 3;
 const SNOW_X1 = 8;
 const SNOW_POCKET = 5; // winter pocket half-length (m)
@@ -140,7 +176,14 @@ export class Sim {
 
     this._buildStage();
     this._buildCar();
-    this.world.addEventListener('preStep', () => this._preStep(DT));
+    this.doomed = [];
+    this.pushing = new Set(); // cells currently carrying a smoothed push force
+    this.stepping = false;
+    this.world.addEventListener('preStep', () => { this.stepping = true; this._preStep(DT); });
+    this.world.addEventListener('postStep', () => {
+      this.stepping = false;
+      for (const b of this.doomed.splice(0)) this.world.removeBody(b);
+    });
     this.vehicle.addToWorld(this.world);
     this._settle();
   }
@@ -151,7 +194,7 @@ export class Sim {
     body.addShape(new Box(new Vec3(...half)));
     body.position.set(...pos);
     body.quaternion.setFromAxisAngle(new Vec3(0, 0, 1), rotZ);
-    body.userData = { kind, grip: kind === 'mud' ? this.level.mud : kind === 'drift' ? this.level.drift : GRIP[kind], terrain: true, half };
+    body.userData = { kind, grip: kind === 'mud' ? this.level.mud : GRIP[kind], terrain: true, half };
     this.world.addBody(body);
     return body;
   }
@@ -184,28 +227,56 @@ export class Sim {
       for (let iz = 0; iz < nz; iz++) {
         const x = SNOW_X0 + (ix + 0.5) * CELL;
         const z = -ZL + (iz + 0.5) * CELL;
-        const h = this.level.snow + this.level.berm * Math.max(0, 1 - Math.abs(x - 3.5) / 1.0);
-        const cell = { id: this.nextCellId++, ix, iz, x, z, h, body: null };
+        const ridge = Math.max(0, 1 - Math.abs(x - 3.5) / 1.0);
+        const h = this.level.snow + this.level.berm * ridge;
+        const rho = this.level.rho + (RIDGE_RHO - this.level.rho) * ridge; // the plowed ridge is denser than the wind-blown drift
+        const cell = { id: this.nextCellId++, ix, iz, x, z, h, rho, m: h * rho, glaze: 0, body: null, bodyH: 0, ver: 0 };
         this._makeCellBody(cell);
         this.snowGrid[ix][iz] = cell;
       }
     }
   }
 
+  /** make / resize / remove the static collision body of a snow cell to match its height */
   _makeCellBody(cell) {
-    if (cell.body) this.world.removeBody(cell.body);
-    cell.body = null;
-    if (cell.h < 0.04) {
-      cell.h = 0;
+    if (cell.h < MIN_BODY_H) {
+      // cannon-es iterates world.bodies by a length fixed at the start of the step: a body must not be removed mid-step
+      if (cell.body) {
+        if (this.stepping) this.doomed.push(cell.body);
+        else this.world.removeBody(cell.body);
+      }
+      cell.body = null;
+      cell.bodyH = 0;
+      if (cell.h < 0.005) { cell.h = 0; cell.m = 0; }
       return;
     }
-    const half = [CELL / 2, cell.h / 2, CELL / 2];
-    const body = new Body({ mass: 0 });
-    body.addShape(new Box(new Vec3(...half)));
-    body.position.set(cell.x, cell.h / 2, cell.z);
-    body.userData = { kind: 'drift', grip: this.level.drift, cell: true };
-    this.world.addBody(body);
-    cell.body = body;
+    if (!cell.body) {
+      const body = new Body({ mass: 0 });
+      body.addShape(new Box(new Vec3(CELL / 2, cell.h / 2, CELL / 2)));
+      body.userData = { kind: 'snowcell', cell };
+      this.world.addBody(body);
+      cell.body = body;
+    }
+    const sh = cell.body.shapes[0];
+    sh.halfExtents.set(CELL / 2, cell.h / 2, CELL / 2);
+    sh.updateConvexPolyhedronRepresentation();
+    sh.updateBoundingSphereRadius();
+    cell.body.position.set(cell.x, cell.h / 2, cell.z);
+    cell.body.updateBoundingRadius();
+    cell.body.aabbNeedsUpdate = true;
+    cell.bodyH = cell.h;
+  }
+
+  /** after a density / mass change: keep height = mass / density, resize the body when it moved enough, flag for redraw */
+  _snowChanged(cell) {
+    cell.h = cell.rho > 0 ? cell.m / cell.rho : 0;
+    if (Math.abs(cell.h - cell.bodyH) > 0.004 || (cell.h < MIN_BODY_H) !== !cell.body) this._makeCellBody(cell);
+    // redraw only on a visible change (the renderer compares cell.ver)
+    if (cell.hV === undefined || Math.abs(cell.h - cell.hV) > 0.004 || Math.abs(cell.rho - cell.rhoV) > 4 || Math.abs(cell.glaze - cell.glazeV) > 0.05) {
+      cell.hV = cell.h; cell.rhoV = cell.rho; cell.glazeV = cell.glaze;
+      cell.ver++;
+      this.snowVersion++;
+    }
   }
 
   _buildDitchGround(ZL) {
@@ -308,7 +379,9 @@ export class Sim {
 
   _settle() {
     this.input.brake = true;
+    this.settling = true; // the fall-in is not played: the snow starts untouched
     for (let i = 0; i < 360; i++) this.world.step(DT);
+    this.settling = false;
     this.chassis.velocity.set(0, 0, 0);
     this.chassis.angularVelocity.set(0, 0, 0);
     this.input.brake = false;
@@ -403,13 +476,14 @@ export class Sim {
       const wi = v.wheelInfos[i];
       const hitBody = wi.raycastResult.body;
       const inContact = wi.isInContact && hitBody;
-      const kind = inContact ? hitBody.userData?.kind ?? 'road' : 'air';
-      const soft = SOFT[kind] ?? 0;
-      let grip = inContact ? hitBody.userData?.grip ?? 0.5 : 0;
+      const cell = inContact ? hitBody.userData?.cell ?? null : null;
+      const kind = !inContact ? 'air' : cell ? snowKind(cell) : hitBody.userData?.kind ?? 'road';
+      const soft = cell ? snowSoft(cell.rho) : SOFT[kind] ?? 0;
+      let grip = !inContact ? 0 : cell ? snowGrip(cell) : hitBody.userData?.grip ?? 0.5;
       if (soft) {
         // dug-in tyres lose grip; mud grip also flutters as the tread clogs and bites (stick-slip)
         const flutter = 1 + 0.12 * Math.sin(this.time * 13 + i * 1.7) + 0.06 * Math.sin(this.time * 29 + i * 3.1); // mean 1: no net grip change
-        grip *= (1 - 0.5 * this.dig[i] * soft) * (soft === 1 ? flutter : 1);
+        grip *= (1 - 0.5 * this.dig[i] * soft) * (soft >= 1 && !cell ? flutter : 1);
       }
       wi.frictionSlip = Math.max(0.05, grip || 1);
       N[i] = inContact ? Math.max(0, wi.suspensionForce) : 0;
@@ -418,6 +492,8 @@ export class Sim {
       st.grip = grip;
       st.load = N[i];
       st.surface = kind;
+      st.cell = cell;
+      st.soft = soft;
       st.air = !inContact;
     });
 
@@ -487,7 +563,7 @@ export class Sim {
     this.wheelDefs.forEach((_, i) => {
       const st = this.wheelState[i];
       const wi = v.wheelInfos[i];
-      const soft = SOFT[st.surface] ?? 0;
+      const soft = st.soft ?? 0;
       const rel = wi.worldTransform.position.vsub(ch.position);
       const vel = ch.getVelocityAtWorldPoint(wi.worldTransform.position, new Vec3()); // takes a WORLD point
       const hs = Math.hypot(vel.x, vel.z); // ground speed of the tyre
@@ -513,8 +589,97 @@ export class Sim {
       this.say('サイドブレーキがかかっていて進めない (Space で解除)', 'warn');
     }
 
+    this._snowStep(dt, N, thr);
     this._jackForce();
     this._ropeForce(dt);
+  }
+
+  // ---------------------------------------------------------------- snow: compaction, ice, bulldozing
+  _snowStep(dt, N, thr) {
+    if (!this.snowGrid || this.settling) return;
+    const touched = new Set();
+    // 1. tyres press the snow under them: density rises (height drops at constant mass); wheelspin shears it
+    //    much faster and, once the snow is dense, polishes it to ice
+    this.wheelDefs.forEach((_, i) => {
+      const st = this.wheelState[i];
+      const cell = st.cell;
+      if (!cell || !(N[i] > 0)) return;
+      const shear = st.spinning && thr !== 0 ? 1 : 0;
+      if (this._densify(cell, rhoEq(N[i] / PATCH), dt, shear)) touched.add(cell);
+    });
+    // 2. the underbody on snow (belly-out) loads the cell it rests on; a car that drives into a cell
+    //    pushes (bulldozes) its snow into the next cell when its push force beats the cell's crushing strength
+    const ch = this.chassis;
+    const side = new Map(); // cell -> { fx, fz }: horizontal force the car puts on it this step
+    for (const ce of this.world.contacts) {
+      const other = ce.bi === ch ? ce.bj : ce.bj === ch ? ce.bi : null;
+      const cell = other?.userData?.cell;
+      if (!cell || cell.h <= 0) continue;
+      const F = Math.min(ce.multiplier || 0, MAX_CONTACT_F); // solver spikes are clipped
+      if (F <= 0) continue;
+      // normal pointing from the chassis toward the cell
+      const sgn = ce.bi === ch ? 1 : -1;
+      const nx = ce.ni.x * sgn;
+      const ny = ce.ni.y * sgn;
+      const nz = ce.ni.z * sgn;
+      if (ny < -0.6) {
+        if (this._densify(cell, rhoEq(F / BELLY_AREA), dt, 0)) touched.add(cell);
+      } else if (Math.abs(ny) < 0.6) {
+        const f = side.get(cell) ?? { fx: 0, fz: 0 };
+        f.fx += F * nx;
+        f.fz += F * nz;
+        side.set(cell, f);
+      }
+    }
+    // The car pushes a cell with a smoothed horizontal force (the raw contact force is spiky). A car that cannot move
+    // (the cell is a static body) still presses with its full thrust, so no motion is required.
+    for (const cell of this.pushing) if (!side.has(cell)) side.set(cell, { fx: 0, fz: 0 });
+    this.pushing.clear();
+    for (const [cell, f] of side) {
+      const inst = Math.hypot(f.fx, f.fz);
+      cell.pushF = (cell.pushF ?? 0) + (inst - (cell.pushF ?? 0)) * Math.min(1, dt / PUSH_TAU);
+      if (cell.pushF > 1) this.pushing.add(cell);
+      if (inst > 0 && cell.pushF > pushYield(cell)) this._bulldoze(cell, f.fx / inst, f.fz / inst, cell.pushF, dt, touched);
+    }
+    for (const c of touched) this._snowChanged(c);
+  }
+
+  /** raise a cell's density toward `target` (load) and by shear; returns true when anything changed */
+  _densify(cell, target, dt, shear) {
+    let r = cell.rho;
+    if (target > r) r += (target - r) * Math.min(1, dt / COMPACT_TAU);
+    if (shear) r += SHEAR_RATE * (1 - r / RHO_ICE) * dt;
+    r = Math.min(RHO_ICE, r);
+    let changed = r > cell.rho;
+    cell.rho = r;
+    if (shear && cell.rho > 550 && cell.glaze < 1) {
+      cell.glaze = Math.min(1, cell.glaze + GLAZE_RATE * dt);
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** push part of a cell's snow into the neighbour in direction (nx,nz); the pushed snow is packed denser */
+  _bulldoze(cell, nx, nz, F, dt, touched) {
+    const horiz = Math.abs(nx) > Math.abs(nz);
+    const jx = cell.ix + (horiz ? Math.sign(nx) : 0);
+    const jz = cell.iz + (horiz ? 0 : Math.sign(nz));
+    const to = this.snowGrid[jx]?.[jz];
+    if (!to) return; // beyond the pocket is a solid bank: nothing to push into
+    const frac = Math.min(0.5, (F / pushYield(cell) - 1) * 0.6 * dt);
+    const dm = cell.m * frac;
+    if (dm <= 0) return;
+    const rhoP = Math.min(RHO_ICE, cell.rho * PUSH_COMPACT);
+    const hNew = to.h + dm / rhoP;
+    if (hNew > H_MAX) return; // the pile is as high as it gets
+    to.rho = (to.m + dm) / hNew;
+    to.m += dm;
+    to.glaze = Math.max(to.glaze, cell.glaze * 0.5);
+    cell.m -= dm;
+    to.h = to.m / to.rho;
+    cell.h = cell.m / cell.rho;
+    touched.add(cell);
+    touched.add(to);
   }
 
   // ---------------------------------------------------------------- jack
@@ -534,7 +699,8 @@ export class Sim {
       return;
     }
     const tilt = Math.acos(clamp(hit.hitNormalWorld.y, -1, 1)) * (180 / Math.PI);
-    const kind = hit.body.userData?.kind;
+    const hitCell = hit.body.userData?.cell;
+    const kind = hitCell ? snowKind(hitCell) : hit.body.userData?.kind;
     const padded = kind === 'mat' || kind === 'helper' || this.items.some((it) => Math.hypot(it.body.position.x - wp.x, it.body.position.z - wp.z) < 0.5);
     this.jack = {
       wheel: wheelIdx,
@@ -818,13 +984,14 @@ export class Sim {
       return false;
     }
     if (this.time < this.scoopReady) return false; // still swinging
-    this.scoopReady = this.time + SCOOP.time;
+    this.scoopReady = this.time + SCOOP.time * Math.min(3, Math.max(1, pv.cell.rho / 150));
     const cell = pv.cell;
-    cell.h = Math.max(0, cell.h - SCOOP.depth);
-    this._makeCellBody(cell);
-    this.snowVersion++;
+    const depth = Math.min(cell.h, scoopDepth(cell.rho));
+    cell.m = Math.max(0, cell.m - depth * cell.rho); // the dug snow is thrown away
+    this._snowChanged(cell);
     this.emit('scoop', { h: cell.h });
-    this.say(cell.h > 0 ? `雪を掘った(この区画 あと${Math.round(cell.h * 100)}cm)` : '雪を掘りきった(地面が出た)', 'info');
+    const hard = cell.rho >= 720 ? '氷で刃が立たない' : cell.rho >= 260 ? '固く締まっている' : '';
+    this.say(cell.h > 0 ? `雪を掘った(${Math.round(depth * 100)}cm 削れた・この区画 あと${Math.round(cell.h * 100)}cm${hard ? `・${hard}` : ''})` : '雪を掘りきった(地面が出た)', 'info');
     return true;
   }
 

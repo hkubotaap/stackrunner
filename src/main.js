@@ -75,25 +75,47 @@ function buildTerrain() {
 }
 buildTerrain();
 
-// winter stage: diggable snow cells (rebuilt whenever the scoop changes the grid)
+// winter stage: snow cells. One box per cell; height, colour and gloss follow the cell's density (powder white,
+// packed snow greyer, ice blue and glossy). A cell is redrawn only when its `ver` changed.
 const snowGroup = new THREE.Group();
 scene.add(snowGroup);
-const snowMat = new THREE.MeshStandardMaterial({ color: 0xfbfdff, roughness: 0.95 });
-let snowShown = -1;
+const snowGeo = new THREE.BoxGeometry(1, 1, 1);
+const SNOW_POWDER = new THREE.Color(0xfbfdff);
+const SNOW_ICE = new THREE.Color(0x9cc6e6);
+const snowMeshes = new Map(); // cell id -> { mesh, ver }
+let snowSimRef = null;
 function syncSnow() {
   if (!sim.snowGrid) {
-    if (snowGroup.children.length) { snowGroup.clear(); snowShown = -1; }
+    if (snowGroup.children.length) { for (const { mesh } of snowMeshes.values()) mesh.material.dispose(); snowGroup.clear(); snowMeshes.clear(); }
+    snowSimRef = null;
     return;
   }
-  if (snowShown === sim.snowVersion && snowGroup.children.length) return;
-  snowShown = sim.snowVersion;
-  for (const c of [...snowGroup.children]) { snowGroup.remove(c); c.geometry.dispose(); }
+  if (snowSimRef !== sim) { // new sim (reset / stage switch): rebuild everything
+    for (const { mesh } of snowMeshes.values()) mesh.material.dispose();
+    snowGroup.clear();
+    snowMeshes.clear();
+    snowSimRef = sim;
+  }
   for (const col of sim.snowGrid) for (const cell of col) {
-    if (cell.h <= 0) continue;
-    const m = new THREE.Mesh(new THREE.BoxGeometry(0.5, cell.h, 0.5), snowMat);
-    m.position.set(cell.x, cell.h / 2, cell.z);
-    m.receiveShadow = true;
-    snowGroup.add(m);
+    let e = snowMeshes.get(cell.id);
+    if (e && e.ver === cell.ver) continue;
+    if (cell.h <= 0) {
+      if (e) { snowGroup.remove(e.mesh); e.mesh.material.dispose(); snowMeshes.delete(cell.id); }
+      continue;
+    }
+    if (!e) {
+      const mesh = new THREE.Mesh(snowGeo, new THREE.MeshStandardMaterial({ color: 0xfbfdff, roughness: 0.95 }));
+      mesh.receiveShadow = true;
+      snowGroup.add(mesh);
+      e = { mesh, ver: -1 };
+      snowMeshes.set(cell.id, e);
+    }
+    e.ver = cell.ver;
+    e.mesh.scale.set(0.5, cell.h, 0.5);
+    e.mesh.position.set(cell.x, cell.h / 2, cell.z);
+    const t = Math.min(1, Math.max(0, (cell.rho - 100) / 817)) ** 0.7;
+    e.mesh.material.color.copy(SNOW_POWDER).lerp(SNOW_ICE, t);
+    e.mesh.material.roughness = 0.95 - 0.7 * Math.min(1, cell.glaze + (cell.rho > 720 ? 0.5 : 0));
   }
 }
 function applyStageLook() {
@@ -562,7 +584,7 @@ function reset() {
   sim = makeSim();
   loadCarModel();
   buildTerrain();
-  snowShown = -1;
+  snowSimRef = null;
   applyStageLook();
   lastRatchet = 0;
   armed = null;
