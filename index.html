@@ -123,6 +123,7 @@
     <div class="row">
       <button class="tb" id="b-helper">スノーヘルパー<kbd>Q</kbd></button>
       <button class="tb" id="b-mat">フロアマット<kbd>E</kbd></button>
+      <button class="tb" id="b-scoop">スコップ<kbd>C</kbd></button>
       <button class="tb" id="b-recover">回収<kbd>⌫</kbd></button>
     </div>
     <h2 style="margin-top:4px">キー Q/E は向き指定で即配置 <span style="letter-spacing:0">[F で切替]</span></h2>
@@ -154,7 +155,8 @@
     <div id="brakeinfo"></div>
   </div>
   <div class="grp">
-    <h2>車種 / 難易度</h2>
+    <h2>ステージ / 車種 / 難易度</h2>
+    <div class="row" id="stages"></div>
     <div class="row" id="cars"></div>
     <div class="row" id="levels"></div>
     <div class="row"><button class="tb" id="b-reset">リセット<kbd>Esc</kbd></button></div>
@@ -164,7 +166,7 @@
 <div id="help" class="panel">
   <b>W/S</b> 前進・後退 &nbsp; <b>A/D</b> ハンドル<br>
   <b>Shift</b> フットブレーキ &nbsp; <b>Space</b> サイドブレーキ(後輪ロック)<br>
-  <b>クリック/タップ</b> 道具を置く・タイヤ選択<br>
+  <b>クリック/タップ</b> 道具を置く・雪を掘る(スコップ)・タイヤ選択<br>
   <b>1-4</b> タイヤ選択 &nbsp; <b>V</b> VSA切替 &nbsp; <b>M</b> ミュート<br>
   ドラッグで視点回転 / ホイールでズーム
 </div>
